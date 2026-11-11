@@ -1,8 +1,8 @@
+import { committedFiles, head } from './memfs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 export interface Skill { name: string; description: string; file: string }
-export async function listSkills(home: string): Promise<Skill[]> {
-  const root = path.join(home, 'skills');
+async function listSkillRoot(root: string): Promise<Skill[]> {
   const skills: Skill[] = [];
   const walk = async (dir: string, depth: number) => {
     if (depth > 4 || skills.length >= 100) return;
@@ -22,9 +22,20 @@ export async function listSkills(home: string): Promise<Skill[]> {
   catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   return skills;
 }
+export async function listSkills(home: string): Promise<Skill[]> {
+  let memory: Skill[] = [];
+  const root=path.join(home,'memory');
+  try { const files=await committedFiles(root);memory=[...files].filter(([p])=>p.startsWith('skills/')&&p.endsWith('/SKILL.md')).map(([p,content])=>({name:p.slice(7,-9),description:(content.match(/^description:\s*(.+)$/m)?.[1]||'Agent memory skill').slice(0,240),file:path.join(root,p)})); }
+  catch(e) { if((e as NodeJS.ErrnoException).code!=='ENOENT') throw e; }
+  const legacy = await listSkillRoot(path.join(home, 'skills'));
+  return [...memory, ...legacy.filter(s => !memory.some(m => m.name === s.name))];
+}
 export async function readSkill(home: string, name: string) {
   const skill = (await listSkills(home)).find(s => s.name === name);
   if (!skill) throw new Error(`Unknown skill: ${name}`);
+  const memoryRoot=path.join(home,'memory');
+  const relative=path.relative(memoryRoot,skill.file).split(path.sep).join('/');
+  if(relative.startsWith('skills/'))return {...skill,content:(await committedFiles(memoryRoot)).get(relative)!,revision:await head(memoryRoot)};
   return { ...skill, content: await fs.readFile(skill.file, 'utf8') };
 }
 export async function skillCatalog(home: string) {

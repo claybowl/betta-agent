@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { memoryCommand, importMemoryBundle } from "./memory-service.js";
+import { reflect, applyReflection, previewReflection } from "./reflection.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -15,17 +17,26 @@ async function main() {
     await runAgent(JSON.parse(raw) as RunInput, event => process.stdout.write(JSON.stringify(event) + "\n"), undefined, controller.signal);
     return;
   }
-  if (!homeArg || !["init", "chat", "run", "resume", "export", "inspect"].includes(command || "")) {
-    console.log(`Donjon durable agent\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID]\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation]\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
+  if (!homeArg || !["init", "chat", "run", "resume", "export", "inspect", "memory", "reflect", "memory-import"].includes(command || "")) {
+    console.log(`Donjon durable agent\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID]\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\nreflect HOME [--apply]\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
     return;
   }
   const home = path.resolve(homeArg);
-  if (command === "init") {
+  if (command === "memory") {
+    console.log(JSON.stringify(await memoryCommand(home,args[0]||'status',args.slice(1)),null,2));
+  } else if (command === "reflect") {
+    const controller=new AbortController(); process.once('SIGTERM',()=>controller.abort());process.once('SIGINT',()=>controller.abort());
+    const proposal=await reflect(home,undefined,controller.signal);
+    console.log(JSON.stringify(args.includes('--apply')&&proposal.status==='ready'?await applyReflection(home,proposal.id):proposal.id==='none'?proposal:await previewReflection(home,proposal.id),null,2));
+  } else if (command === "memory-import") {
+    if(args.length<3)throw new Error('memory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL');
+    console.log(JSON.stringify(await importMemoryBundle(home,args[0],args[1],args[2]),null,2));
+  } else if (command === "init") {
     if (!args[0] || !args[1]) throw new Error("init requires a name and provider/model");
     console.log(JSON.stringify(await initHome(home, args[0], args[1]), null, 2));
   } else if (command === "export") {
     if (!args[0]) throw new Error("export requires a destination");
-    await exportHome(home, args[0], args.includes("--continuation"));
+    await exportHome(home, args[0], args.includes("--continuation"), args.includes("--history"));
     console.log(`Exported to ${path.resolve(args[0])}`);
   } else if (command === "inspect") {
     console.log(JSON.stringify(await readManifest(home), null, 2));

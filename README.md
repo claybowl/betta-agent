@@ -66,7 +66,7 @@ Stdio takes an executable and a JSON argument array, without a shell. Environmen
 
 ### Skills and action evidence
 
-Install `skills/<name>/SKILL.md` in the agent home. A bounded catalog (up to 100 skills, four directory levels, files up to 64 KB) is refreshed in the system context before each model request. Symlinks and hidden directories are ignored. YAML-style `description:` metadata supplies the catalog summary. The `skill_read` tool loads instructions on demand and records usage. This proves which instructions were loaded, not perfect model compliance. Skills never grant tool permissions.
+Install `memory/skills/<name>/SKILL.md` in the agent memory repository and commit it; legacy `skills/<name>/SKILL.md` remains supported. Committed memory skills take precedence over legacy names. A bounded legacy catalog (up to 100 skills, four directory levels, files up to 64 KB) and the validated memory skill catalog is refreshed in the system context before each model request. Symlinks and hidden directories are ignored. YAML-style `description:` metadata supplies the catalog summary. The `skill_read` tool loads instructions on demand and records usage. This proves which instructions were loaded, not perfect model compliance. Skills never grant tool permissions.
 
 Action intent is flushed to `state/actions.jsonl` before a tool starts. A completion receipt means the tool returned; it does not independently prove every external effect. Errors may leave partial effects. Missing receipts and interrupted calls are **unknown**. Inspect files or the external service before retrying uncertain work. Journals may include command arguments and should be treated as private agent state. The UI strips terminal control sequences from tool output.
 
@@ -76,13 +76,15 @@ Action intent is flushed to `state/actions.jsonl` before a tool starts. A comple
 agent.json             identity, model, instructions, allowShell
 memory/                authoritative Markdown memory, with its own Git history
 settings.json          per-agent runtime, working directory, permissions, connections
-skills/                procedures cataloged and loaded on demand
+memory/.memfs.config.json  memory structure, size and read-only constraints
+memory/skills/         agent skills stored with memory
+skills/                legacy skills; memory skills take precedence
 state/actions.jsonl    local action receipts and interruption evidence
 state/runtime.sqlite   transcripts, submissions, tool results, recovery state
 state/owner.sqlite     exclusive process-ownership lock
 ```
 
-Root Markdown is loaded before each model request, including after compaction. Deeper references stay out of context until read. Core memory is limited to 24,000 characters; individual memory files to 128 KB. Memory changes use atomic replacements and version checks; already-applied replacements are safe to replay. The agent is prompted to record important learning, but automatic background consolidation is not implemented.
+Core memory is compiled from one validated Git revision per turn, including after compaction. Existing homes migrate automatically on their next run; originals remain in Git. Deeper references stay out of context until read. Memory limits and read-only paths are configurable; defaults are 24,000 core characters and 20,000 characters per file, with a model-dependent context allowance. Memory changes use checked multi-file Git transactions; interrupted updates recover on restart. `/memory` provides inspection, search, history, synchronization and bundles. `/reflect` creates an evidence-backed proposal; apply it explicitly or use the headless `reflect HOME --apply` command from a Doer routine. See [Memory architecture and operations](MEMORY.md) for budgets, migration, recovery and limits.
 
 Application appearance and known agent paths live in `~/.donjon/settings.json` (override the directory with `DONJON_CONFIG_DIR`).
 
@@ -90,7 +92,7 @@ The application Git repository tracks software. Agent memory has separate histor
 
 A crash leaves work recoverable; an explicit Doer stop or timeout cancels the submission. A second owner receives a busy error. Request IDs deduplicate the same logical input. Arbitrary shell/API effects require their own duplicate prevention. This is trusted local execution, not a filesystem sandbox.
 
-Copy exports create a new agent identity and fresh execution state. Continuation exports preserve identity and create a consistent SQLite snapshot. Both preserve current memory, skills, and settings; exported MCP connections are disabled and require reactivation. Copy exports reset the working directory; continuation exports keep it and include the action journal. Exported memory starts fresh Git history. Use Git clone/bundle separately for full memory history. Relocated pending work requires compatible tools; external workspace paths and absolute paths embedded in prior tool arguments are not rewritten. Review memory/transcripts before sharing.
+Copy exports create a new agent identity and fresh execution state. Continuations also preserve newly recorded conversation recall. Continuation exports preserve identity and create a consistent SQLite snapshot. Both preserve current memory, skills, and settings; use `--history` to preserve memory Git history. exported MCP connections are disabled and require reactivation. Copy exports reset the working directory; continuation exports keep it and include the action journal. Without `--history`, exported memory starts fresh Git history. Use Git clone/bundle separately for full memory history. Relocated pending work requires compatible tools; external workspace paths and absolute paths embedded in prior tool arguments are not rewritten. Review memory/transcripts before sharing.
 
 ## Development and releases
 
@@ -103,6 +105,8 @@ npm run release:prepare -- 0.1.1   # prepare a new version and release notes
 [Release process](RELEASING.md) · [Changelog](CHANGELOG.md) · [Doer integration](DOER.md)
 
 The package installs as `donjon-agent`. GitHub releases contain an installable `.tgz` and SHA256SUMS. Public npm publishing is disabled.
+
+[Memory guide](MEMORY.md) covers `/memory`, `/reflect`, history bundles, remote synchronization, and scheduling reflection through Doer.
 
 ## Source history
 
