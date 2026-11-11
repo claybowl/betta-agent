@@ -1,12 +1,17 @@
+import { randomUUID } from "node:crypto";
+import { readSettings } from "./settings.js";
+import { Connections } from "./connections.js";
+import { Activity } from "./activity.js";
+import { skillCatalog, readSkill } from "./skills.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { AssistantEntry, Harness, createRegistry, defineDoc, defineExtension, defineTool, section, type Submission, type SubmissionId, type ConversationId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
+import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { createProvider, type Models } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
@@ -51,23 +56,38 @@ export async function makeModels(model: string, baseUrl?: string): Promise<Model
   return models;
 }
 
-export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedModels?: Models, signal?: AbortSignal): Promise<RunResult> {
+export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedModels?: Models, signal?: AbortSignal, suppliedConnections?: Connections): Promise<RunResult> {
   const home = await fs.realpath(input.home);
   const manifest = await readManifest(home);
-  const cwd = await fs.realpath(input.cwd || home);
+  const settings = await readSettings(home);
+  const cwd = await fs.realpath(input.cwd || settings.cwd || home);
+  if (!(await fs.stat(cwd)).isDirectory()) throw new Error("Working directory must be a directory");
   const memory = await fs.realpath(input.memoryDir || path.join(home, "memory"));
   if (memory !== await fs.realpath(path.join(home, "memory"))) throw new Error("Bind Doer memory to agentHome/memory so interactive use and export share the same memory.");
   const release = await lockHome(home);
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", forwardAbort, { once: true });
+  if (signal?.aborted) forwardAbort();
+  const runSignal = controller.signal;
+  const timeout = settings.timeoutSeconds ? setTimeout(() => controller.abort(new Error("Run timed out")), settings.timeoutSeconds * 1000) : undefined;
+  const connections = suppliedConnections || new Connections();
   let harness: Harness | undefined;
   let starting: UsageTotals | undefined;
   let abortHandler: (() => void) | undefined;
+  let abortWork: Promise<void> | undefined;
   try {
-    signal?.throwIfAborted();
+    runSignal.throwIfAborted();
     const selected = input.model || manifest.model;
     const split = selected.indexOf("/");
     if (split < 1) throw new Error("Model must be provider/model-id");
     const models = suppliedModels || await makeModels(selected, input.baseUrl);
     const registry = createRegistry();
+    const activity = new Activity(home, emit);
+    await connections.sync(settings, cwd, emit, runSignal);
+    runSignal.throwIfAborted();
+    const permissions = { ...settings.permissions };
+    if (input.allowShell !== undefined) { permissions.shell = input.allowShell; permissions.files = input.allowShell; }
     const memoryExtension = defineExtension({ name: "agent-memory", sections: [section("memory", async () =>
       `Your persistent memory lives at ${memory}. Core files below are refreshed before every model request.\n` +
       "Read deeper Markdown files on demand. Use memory_read then memory_write with the returned sha256 to update durable knowledge. " +
@@ -86,18 +106,43 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
             return { output: [{ type: "text", text: JSON.stringify({ sha256: result.sha256 }) }] };
           } }),
       ] });
-    registry.install(memoryExtension);
-    registry.install(CodingTools);
-    registry.install(createCodemodeExtension({ sandbox: new CodemodeSandbox({ memoryLimitBytes: 64 * 1024 * 1024 }) }));
+    registry.install({ ...memoryExtension, tools: memoryExtension.tools?.map(t => activity.wrap(t)) });
+    const skillTool = defineTool({ name: "skill_read", description: "Load an installed skill by catalog name before using it.",
+      parameters: Type.Object({ name: Type.String() }), replay: "safe", execute: async args => {
+        const skill = await readSkill(home, args.name);
+        emit({ type: "skill", name: skill.name });
+        return { output: [{ type: "text", text: skill.content }] };
+      } });
+    registry.install(defineExtension({ name: "agent-skills", sections: [section("skills", () => skillCatalog(home))], tools: [activity.wrap(skillTool)] }));
+    const coding = (CodingTools.tools || []).filter(t => t.name === "read" || (t.name === "bash" ? permissions.shell : permissions.files)).map(t => activity.wrap(t));
+    registry.install({ ...CodingTools, tools: coding });
+    const mcpTools = connections.tools().map(t => activity.wrap(t));
+    registry.install(defineExtension({ name: "mcp-connections", tools: mcpTools }));
+    const codemode = createCodemodeExtension({ sandbox: new CodemodeSandbox({ memoryLimitBytes: 64 * 1024 * 1024 }) });
+    const codeTools = permissions.shell && permissions.files ? (codemode.tools || []).map(t => activity.wrap(t)) : [];
+    registry.install({ ...codemode, tools: codeTools });
+    const allowedTools = [...coding, ...(memoryExtension.tools || []).map(t => activity.wrap(t)), activity.wrap(skillTool), ...mcpTools, ...codeTools];
+    class LiveEnvironment extends NodeExecutionEnv {
+      override async exec(command: Parameters<NodeExecutionEnv['exec']>[0], options: Parameters<NodeExecutionEnv['exec']>[1], ctx: Parameters<NodeExecutionEnv['exec']>[2]) {
+        const id = randomUUID();
+        emit({ type: "command_start", id, command, cwd: options?.cwd || this.cwd });
+        const result = await super.exec(command, { ...options, onOutput: (text, context, info) => {
+          options?.onOutput?.(text, context, info);
+          emit({ type: "command_output", id, text, stream: info.stream });
+        } }, ctx);
+        emit({ type: "command_end", id, exitCode: result.ok ? result.value.exitCode : undefined, error: result.ok ? undefined : result.error.message });
+        return result;
+      }
+    }
     harness = await Harness.open(await openNodeSqliteStorage(path.join(home, "state", "runtime.sqlite")), {
-      models, registry, env: (target) => new NodeExecutionEnv({ cwd: target.cwd || cwd }),
-      settings: { toolExecution: "sequential", compaction: { enabled: true }, retry: { maxRetries: 2 } },
+      models, registry, env: (target) => new LiveEnvironment({ cwd: target.cwd || cwd }),
+      settings: { toolExecution: "sequential", compaction: { enabled: settings.compaction }, retry: { maxRetries: 2 } },
     }, context);
     const runtime = harness;
     const before = await runtime.usage(context);
     starting = totals(before);
     abortHandler = () => {
-      void (async () => {
+      abortWork = (async () => {
         const state = await runtime.snapshot(State, context);
         if (state?.pending) {
           const conversation = await runtime.conversation(state.pending.conversation, context);
@@ -106,7 +151,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
         }
       })().catch(error => emit({ type: "error", message: String(error) }));
     };
-    signal?.addEventListener("abort", abortHandler, { once: true });
+    runSignal.addEventListener("abort", abortHandler, { once: true });
     const settle = async (submission: Submission) => {
       const result = await submission.wait(context);
       if (result.status !== "done" || result.type !== "input") {
@@ -117,6 +162,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       return (entry?.model || []).flatMap(message => message.role === "assistant" ? message.content.filter(c => c.type === "text").map(c => c.text) : []).join("\n");
     };
     await runtime.commit(async tx => { await tx.doc(State); }, context);
+    if (runSignal.aborted) { abortHandler(); await abortWork; runSignal.throwIfAborted(); }
     let state = (await runtime.snapshot(State, context))!;
     let recovered = false;
     let summary = "";
@@ -130,7 +176,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       if (pending.memory !== "@agent-memory" && pending.memory !== memory) throw new Error("Unfinished work uses a different memory binding. Restore the original binding to resume.");
       conversationId = pending.conversation;
       const pendingConversation = await runtime.conversation(pending.conversation, context);
-      await pendingConversation?.configure({ cwd, tools: (input.allowShell ?? manifest.allowShell) ? null : [...(CodingTools.tools || []).filter(t => t.name === "read"), ...(memoryExtension.tools || [])] }, context);
+      await pendingConversation?.configure({ cwd, maxTurns: settings.maxTurns, instructions: `${manifest.instructions}\n${input.instructions || ""}`, tools: allowedTools }, context);
       emit({ type: "recovery", requestId: pending.requestId });
       // Restore task attribution, but use the current worker's fresh credentials.
       const keys = ["DOER_RUN_ID", "DOER_TASK_ID", "DOER_WAKE_REASON"];
@@ -149,7 +195,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       state = (await runtime.snapshot(State, context))!;
     }
     if (!input.resumeOnly) {
-      signal?.throwIfAborted();
+      runSignal.throwIfAborted();
       if (!input.prompt || !requestId) throw new Error("A prompt and stable requestId are required");
       const key = hash(`${input.sessionKey || "main"}\n${cwd === home ? "@agent-home" : cwd}`);
       conversationId = state.conversations[key];
@@ -164,8 +210,8 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       const conversation = await runtime.conversation(conversationId, context);
       if (!conversation) throw new Error("Stored conversation is missing");
       await conversation.configure({ model: { provider: selected.slice(0, split), modelId: selected.slice(split + 1) },
-        cwd, maxTurns: 50, instructions: `${manifest.instructions}\n${input.instructions || ""}\nSkills are in ${path.join(home, "skills")}. Read relevant SKILL.md files before using them.`,
-        tools: (input.allowShell ?? manifest.allowShell) ? null : [...(CodingTools.tools || []).filter(t => t.name === "read"), ...(memoryExtension.tools || [])],
+        cwd, maxTurns: settings.maxTurns, instructions: `${manifest.instructions}\n${input.instructions || ""}\nSkills are in ${path.join(home, "skills")}. Read relevant SKILL.md files before using them.`,
+        tools: allowedTools,
       }, context);
       // Submission and pending pointer are one transaction: there is no crash window between them.
       const submission = await runtime.commit(async tx => {
@@ -177,7 +223,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
         return submission;
       }, context);
       emit({ type: "init", sessionId: String(conversationId || ""), requestId, model: selected });
-      if (signal?.aborted) abortHandler();
+      if (runSignal.aborted) abortHandler();
       const handle = await runtime.submission(submission, context);
       if (!handle) throw new Error("Submission missing after commit");
       summary = await settle(handle);
@@ -199,7 +245,10 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     }
     throw error;
   } finally {
-    if (abortHandler) signal?.removeEventListener("abort", abortHandler);
-    try { await harness?.close(context); } finally { release(); }
+    if (abortHandler) runSignal.removeEventListener("abort", abortHandler);
+    signal?.removeEventListener("abort", forwardAbort);
+    if (timeout) clearTimeout(timeout);
+    try { await abortWork; await harness?.close(context); }
+    finally { try { if (!suppliedConnections) await connections.close(); } finally { release(); } }
   }
 }

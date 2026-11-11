@@ -139,12 +139,22 @@ export async function exportHome(home: string, destination: string, continuation
     };
     await copyTree(path.join(home, "memory"), path.join(destination, "memory"));
     await copyTree(path.join(home, "skills"), path.join(destination, "skills"));
+    // Settings travel with the agent; local connections require explicit activation on the receiving machine.
+    try {
+      const settings = JSON.parse(await fs.readFile(path.join(home, "settings.json"), "utf8"));
+      settings.connections = (settings.connections || []).map((c: Record<string, unknown>) => ({ ...c, enabled: false }));
+      settings.permissions.mcp = false;
+      if (!continuation) delete settings.cwd;
+      await fs.writeFile(path.join(destination, "settings.json"), JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     if (!continuation) manifest.id = randomUUID();
     await fs.writeFile(path.join(destination, "agent.json"), JSON.stringify(manifest, null, 2) + "\n");
     if (continuation) {
       const source = path.join(home, "state", "runtime.sqlite");
       await fs.access(source);
       await fs.mkdir(path.join(destination, "state"));
+      try { await fs.copyFile(path.join(home, "state", "actions.jsonl"), path.join(destination, "state", "actions.jsonl")); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const { DatabaseSync } = await import("node:sqlite");
       const db = new DatabaseSync(source);
       try { db.exec(`VACUUM INTO '${path.join(destination, "state", "runtime.sqlite").replaceAll("'", "''")}'`); }

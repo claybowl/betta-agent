@@ -2,7 +2,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { createInterface } from "node:readline/promises";
+import { chat } from "./chat.js";
 import { initHome, readManifest, exportHome } from "./home.js";
 import { runAgent, type RunInput } from "./harness.js";
 const [command, homeArg, ...args] = process.argv.slice(2);
@@ -16,7 +16,7 @@ async function main() {
     return;
   }
   if (!homeArg || !["init", "chat", "run", "resume", "export", "inspect"].includes(command || "")) {
-    console.log(`Donjon durable agent\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID]\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation]\n\nSet provider API keys in your environment. Agent files contain no credentials.\nSet allowShell=true in agent.json to enable shell and file-writing tools.`);
+    console.log(`Donjon durable agent\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID]\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation]\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
     return;
   }
   const home = path.resolve(homeArg);
@@ -31,20 +31,7 @@ async function main() {
     console.log(JSON.stringify(await readManifest(home), null, 2));
     console.log(await fs.readFile(path.join(home, "memory", "MEMORY.md"), "utf8"));
   } else if (command === "chat") {
-    const manifest = await readManifest(home);
-    console.log(`${manifest.name} · durable memory · /exit to leave · /resume to recover unfinished work`);
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      while (true) {
-        const prompt = (await rl.question("You > ")).trim();
-        if (prompt === "/exit") break;
-        if (!prompt) continue;
-        try {
-          const result = await runAgent({ home, prompt, requestId: randomUUID(), resumeOnly: prompt === "/resume" });
-          console.log(`\n${manifest.name} > ${result.summary}\n`);
-        } catch (error) { console.error(error instanceof Error ? error.message : error); }
-      }
-    } finally { rl.close(); }
+    await chat(home);
   } else {
     const result = await runAgent({ home, prompt: args[0], requestId: args[1] || randomUUID(), resumeOnly: command === "resume" });
     console.log(result.summary);
