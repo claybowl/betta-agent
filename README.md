@@ -111,3 +111,5 @@ The package installs as `donjon-agent`. GitHub releases contain an installable `
 ## Source history
 
 Extracted from Doer commit `039226f5` on 2026-11-11. Relevant file history was retained; extraction rewrote commit IDs. The Doer adapter and its subprocess integration tests remain in Doer. This repository is the source of truth for future runtime changes.
+
+Memory map: `/memory graph` shows core and deferred files. `/memory graph PATH` shows outgoing Markdown/wiki links and backlinks; `/memory read PATH` opens a file. The map uses committed memory and does not infer relationships.
