@@ -1,6 +1,6 @@
 {
   "name": "donjon-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Portable local agents with Markdown memory and durable Pi execution",
   "type": "module",
   "license": "MIT",

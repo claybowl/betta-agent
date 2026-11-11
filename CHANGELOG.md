@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-11
+
 
 - Add themed terminal chat, ASCII startup banner, slash-command completion, and settings screens.
 - Stream shell commands/output; Escape cancels the current turn. Persist action receipts and show unknown outcomes after interruption.
