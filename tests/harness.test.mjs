@@ -76,29 +76,6 @@ test('copy export changes identity; continuation snapshot retains sessions',asyn
  assert.equal(fresh.faux.state.callCount,0);
 });
 
-test('Doer adapter launches a real worker against a local OpenAI-compatible server',async t=>{
- const {createServer}=await import('node:http');
- const {execute}=await import('../dist/execute.js');
- const dir=await home(t);
- let requests=0;
- const server=createServer(async(req,res)=>{
-   let raw=''; for await(const chunk of req) raw+=chunk;
-   const body=JSON.parse(raw); requests++;
-   assert.match(JSON.stringify(body.messages),/Test/);
-   res.writeHead(200,{'Content-Type':'text/event-stream'});
-   res.end('data: '+JSON.stringify({id:'local-1',object:'chat.completion.chunk',created:1,model:'test',choices:[{index:0,delta:{role:'assistant',content:'Worker integration verified.'},finish_reason:null}]})+'\n\n'+'data: '+JSON.stringify({id:'local-1',object:'chat.completion.chunk',created:1,model:'test',choices:[{index:0,delta:{},finish_reason:'stop'}],usage:{prompt_tokens:25,completion_tokens:4,total_tokens:29}})+'\n\ndata: [DONE]\n\n');
- });
- await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
- t.after(()=>new Promise(resolve=>server.close(resolve)));
- let pid=0;
- const result=await execute({runId:'adapter-proof',agent:{id:'agent-1',companyId:'company-1',name:'Test',adapterType:'pi_durable',adapterConfig:{}},
-   config:{agentHome:dir,model:'ollama/test',apiBaseUrl:`http://127.0.0.1:${server.address().port}/v1`},
-   runtime:{sessionId:null,sessionParams:null,sessionDisplayId:null,taskKey:null},context:{prompt:'Hello'},
-   onLog:async()=>{},onSpawn:async meta=>{pid=meta.pid;}});
- assert.equal(result.exitCode,0,result.errorMessage); assert.equal(result.summary,'Worker integration verified.');
- assert.ok(pid>0);assert.equal(requests,1);assert.equal(result.usage.inputTokens,25);
-});
-
 test('explicit cancellation does not leave work queued for the next wake',async t=>{
  const dir=await home(t), controller=new AbortController();
  const first=fake([fauxAssistantMessage('Should be cancelled.')]);

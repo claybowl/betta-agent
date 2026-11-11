@@ -1,0 +1,15 @@
+import fs from 'node:fs';
+import {execFileSync} from 'node:child_process';
+const pkg = JSON.parse(fs.readFileSync('package.json'));
+const lock = JSON.parse(fs.readFileSync('npm-shrinkwrap.json'));
+const version = pkg.version;
+if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error('Invalid semantic version');
+const tagIndex = process.argv.indexOf('--tag');
+const tag = tagIndex >= 0 ? process.argv[tagIndex+1] : process.env.GITHUB_REF_NAME;
+if (tag && tag !== `v${version}`) throw new Error(`Tag ${tag} does not match package v${version}`);
+if (lock.version !== version || lock.packages[''].version !== version) throw new Error('Package and shrinkwrap versions differ');
+const notes = fs.readFileSync(`releases/v${version}.md`,'utf8');
+if (notes.includes('TODO') || notes.trim().length < 40) throw new Error('Complete release notes before releasing');
+if (!fs.readFileSync('CHANGELOG.md','utf8').includes(`## ${version}`)) throw new Error('Missing changelog entry');
+if (process.argv.includes('--require-clean') && execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim()) throw new Error('Release requires a clean checkout');
+console.log(`Release v${version}: manifest, lock, changelog, and notes agree.`);

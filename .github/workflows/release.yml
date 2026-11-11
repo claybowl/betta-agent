@@ -1,0 +1,39 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+  release:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: npm-shrinkwrap.json
+      - run: npm ci --ignore-scripts
+      - run: npm run release:check -- --require-clean
+      - run: npm run build
+      - name: Package and checksum
+        run: |
+          mkdir artifacts
+          npm pack --ignore-scripts --pack-destination artifacts
+          cd artifacts
+          sha256sum *.tgz > SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          args=()
+          if [[ "$version" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$TAG" artifacts/*.tgz artifacts/SHA256SUMS --verify-tag --title "Donjon Agent $version" --notes-file "releases/$TAG.md" "${args[@]}"

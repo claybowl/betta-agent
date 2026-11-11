@@ -1,81 +1,69 @@
-# Donjon durable agents
+# Donjon Agent
 
-A local agent home with Markdown memory, Git history, and Pi Durable execution recovery. Use the same agent from a terminal or Doer. Requires Node **22.19+** and Git.
+A local agent harness built on Pi Durable. Agent identity and Markdown memory persist across conversations; execution checkpoints allow interrupted work to recover after a process crash.
 
 ## Start
 
-From the Doer checkout:
+Requires Node **22.19+**, Git, and an available model (Ollama locally or a provider API key).
 
 ```sh
-pnpm --filter @doerai/adapter-pi-durable build
-node packages/adapters/pi-durable/dist/cli.js init "$HOME/.donjon/agents/dondog" DonDog ollama/qwen3:8b
-node packages/adapters/pi-durable/dist/cli.js chat "$HOME/.donjon/agents/dondog"
+npm ci --ignore-scripts
+npm run build
+./donjon-agent chat "$HOME/.donjon/agents/dondog"
 ```
 
-Use an installed Ollama model, or choose a built-in `provider/model-id` and set its provider API key in your environment. Ollama defaults to `http://localhost:11434/v1` (override `OLLAMA_BASE_URL`). Provider credentials stay outside the agent manifest. The standalone archive installs the same CLI as `donjon-agent`. Install it with `npm install -g /absolute/path/to/donjon-agent-0.1.0.tgz`. Build an archive with `pnpm --filter @doerai/adapter-pi-durable package:standalone`.
+Existing DonDog homes work directly. To create another agent:
 
-```text
-agent.json              version, identity, model, instructions, allowShell
-memory/                 authoritative Markdown memory; its own local Git repository
-  MEMORY.md             navigation and reference index
-  persona.md            identity
-  human.md              durable knowledge about the person
-skills/                 SKILL.md procedures, read on demand
-state/runtime.sqlite    conversations, submissions, tool results, recovery state
-state/owner.sqlite      OS-backed exclusive ownership lock
+```sh
+./donjon-agent init "$HOME/.donjon/agents/my-agent" 'My Agent' ollama/qwen3.5:9b
+./donjon-agent chat "$HOME/.donjon/agents/my-agent"
 ```
 
-Root Markdown files are injected before every model request, including after compaction. Deeper files stay out of context until read. Core memory is limited to 24,000 characters; individual files to 128 KB. A memory tool reads a file and returns its SHA-256; writes require that hash (or `missing` for a new file). Stale writes fail instead of overwriting newer edits. The agent is instructed to record important learning during work; automatic background dreaming/consolidation is not implemented.
-
-New agents can read local files and update their own memory. Set `allowShell: true` in agent.json to enable Pi's local shell, general write/edit tools, and Codemode. This is trusted local execution, not a filesystem security sandbox. Shell commands can access the worker environment; only enable them for agents you trust.
+Use an Ollama model installed on your machine. Ollama defaults to localhost:11434/v1; override OLLAMA_BASE_URL if needed. For other providers set their API key in your environment and choose provider/model-id. Credentials remain outside the manifest.
 
 ## Commands
 
-```sh
-donjon-agent init HOME NAME PROVIDER/MODEL
-donjon-agent chat HOME                    # /exit, /resume
-donjon-agent run HOME 'Your task' REQUEST_ID
-donjon-agent resume HOME
-donjon-agent inspect HOME
-donjon-agent export HOME NEW_DIRECTORY
-donjon-agent export HOME NEW_DIRECTORY --continuation
+```text
+init HOME NAME PROVIDER/MODEL
+chat HOME                         /exit, /resume
+run HOME PROMPT [REQUEST_ID]
+resume HOME
+inspect HOME
+export HOME NEW_DIRECTORY
+export HOME NEW_DIRECTORY --continuation
 ```
 
-The terminal interface is a simple line-oriented chat, not the stock Pi fullscreen TUI. All commands use the same durable runtime. A new session shares memory but has its own transcript; the runtime API and Doer task keys select sessions. Reuse a request ID only to retry the same logical input. Do not assign the same home to two different agents.
+The terminal is line-oriented chat. Shell and general file modification tools are available when `allowShell` is true in agent.json. They are disabled for new homes. MCP, desktop UI, and in-app settings are future features.
 
-## Doer configuration
+## Agent homes
 
-Choose `pi_durable` and configure:
-
-```json
-{
-  "agentHome": "/absolute/path/to/.donjon/agents/dondog",
-  "model": "ollama/qwen3:8b",
-  "allowShell": true,
-  "timeoutSec": 300
-}
+```text
+agent.json             identity, model, instructions, allowShell
+memory/                authoritative Markdown memory, with its own Git history
+skills/                procedures read on demand
+state/runtime.sqlite   transcripts, submissions, tool results, recovery state
+state/owner.sqlite     exclusive process-ownership lock
 ```
 
-Optional: `cwd`, `instructionsFilePath`, `promptTemplate`, `env`, `apiBaseUrl` (Ollama), `apiKey` (prefer Doer secret-backed environment variables). The model comes from agent.json when omitted for an existing home. No home? The adapter creates one under `~/.doer/durable-agents/<company-hash>/<agent-hash>`.
+Root Markdown is loaded before each model request, including after compaction. Deeper references stay out of context until read. Core memory is limited to 24,000 characters; individual memory files to 128 KB. Memory changes use atomic replacements and version checks; already-applied replacements are safe to replay. The agent is prompted to record important learning, but automatic background consolidation is not implemented.
 
-Bind Doer's MemFS to **this home's memory directory** to inspect it in Doer. `memoryDir`, if explicitly configured, must resolve to that same directory. An unrelated automatically provisioned Doer memory binding is not imported or used by this runtime. This prevents interactive mode and exports from silently using a different memory store. Import existing memory by copying reviewed Markdown files into memory/ while the agent is stopped; keep core identity/preferences at its root.
+The application Git repository tracks software. Agent memory has separate history. Runtime databases and credentials do not belong in this repository. Updating or cloning the software does not copy or replace agent homes.
 
-A Doer worker receives that run's prompt, credentials, identity, task attribution, and logs. It reports its child PID for process management, structured result, token usage, and Pi catalog-based estimated cost. It never modifies the server's environment. Doer owns schedules and governance; this package does not run another scheduler.
+A crash leaves work recoverable; an explicit Doer stop or timeout cancels the submission. A second owner receives a busy error. Request IDs deduplicate the same logical input. Arbitrary shell/API effects require their own duplicate prevention. This is trusted local execution, not a filesystem sandbox.
 
-## Recovery and portability
+Copy exports create a new agent identity and fresh execution state. Continuation exports preserve identity and create a consistent SQLite snapshot. Both preserve current memory and skills; exported memory starts fresh Git history. Use Git clone/bundle separately for full memory history. Relocated pending work requires compatible tools; external workspace paths and absolute paths embedded in prior tool arguments are not rewritten. Review memory/transcripts before sharing.
 
-An explicit Doer stop or timeout sends SIGTERM and cancels the current submission. An unexpected process crash (including SIGKILL) leaves the submission pending. The next wake (or `resume`) recovers it before submitting new work. Completed request IDs return their stored answer without another model request. A second process gets an explicit busy error while the home is owned.
-
-Memory writes are replay-safe. Arbitrary shell/API effects are **not exactly-once**: interrupted non-replay-safe tools return an interruption to the model. External integrations must use their own operation IDs/reconciliation. Process-crash recovery does not promise protection against loss of the host's newest writes during power failure.
-
-Copy export creates a new identity with the current memory/skills and fresh execution state. Continuation export preserves identity and uses SQLite `VACUUM INTO` under the ownership lock for a consistent database snapshot. Both require a new destination directory. Model selection must remain unchanged until unfinished work settles. Exports start fresh Git history for the memory snapshot; use Git clone/bundle separately when the full memory history is needed. Hidden files and symlinks are excluded/refused, and machine credentials are not copied from the runtime environment. Memory and transcripts can contain personal data or tool output: review the material you choose to share.
-
-Homes using their own workspace can be relocated. Pending work using an external workspace must resume in that same workspace. Absolute paths embedded in old tool arguments or transcript text are not rewritten; full continuation on another machine requires compatible tools and workspace paths. Provider access must be configured again on the receiving machine.
-
-## Verification
+## Development and releases
 
 ```sh
-pnpm --filter @doerai/adapter-pi-durable test
+npm run check                     # typecheck, tests, package install/API smoke test
+npm run release:prepare -- 0.1.1   # prepare a new version and release notes
 ```
 
-Tests cover fresh-session recall, request deduplication, stale-write rejection, traversal/symlink rejection, exclusive ownership, a real SIGKILL between a memory write and its tool-result commit, copy/continuation export, and the actual Doer subprocess against a local OpenAI-compatible test server. The integration test requires permission to listen on localhost; no paid model service is used.
+[Release process](RELEASING.md) · [Changelog](CHANGELOG.md) · [Doer integration](DOER.md)
+
+The package installs as `donjon-agent`. GitHub releases contain an installable `.tgz` and SHA256SUMS. Public npm publishing is disabled.
+
+## Source history
+
+Extracted from Doer commit `039226f5` on 2026-11-11. Relevant file history was retained; extraction rewrote commit IDs. The Doer adapter and its subprocess integration tests remain in Doer. This repository is the source of truth for future runtime changes.

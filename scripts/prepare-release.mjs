@@ -1,0 +1,14 @@
+import fs from 'node:fs';
+const version = process.argv[2];
+if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version || '')) throw new Error('Usage: npm run release:prepare -- 0.1.1');
+const pkg = JSON.parse(fs.readFileSync('package.json'));
+if (pkg.version === version || fs.existsSync(`releases/v${version}.md`)) throw new Error('Version already prepared; choose a new version');
+const lock = JSON.parse(fs.readFileSync('npm-shrinkwrap.json'));
+pkg.version = lock.version = lock.packages[''].version = version;
+fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n');
+fs.writeFileSync('npm-shrinkwrap.json',JSON.stringify(lock,null,2)+'\n');
+const date = new Date().toISOString().slice(0,10);
+const changelog = fs.readFileSync('CHANGELOG.md','utf8');
+fs.writeFileSync('CHANGELOG.md',changelog.replace('# Changelog',`# Changelog\n\n## ${version} — ${date}\n\nTODO: describe the changes.`));
+fs.writeFileSync(`releases/v${version}.md`,`# Donjon Agent ${version}\n\nTODO: describe changes, compatibility, and upgrade steps.\n`);
+console.log(`Prepared v${version}. Complete CHANGELOG.md and releases/v${version}.md, run npm run check, then commit and tag.`);
