@@ -1,3 +1,6 @@
+import { memoryCommand } from './memory-service.js';
+import { reflect, previewReflection, proposals, applyReflection, discardReflection, retryReflection, reflectionSettings } from './reflection.js';
+import { saveState } from './memfs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -12,7 +15,7 @@ import { readActions } from './activity.js';
 import { Connections } from './connections.js';
 import { stripVTControlCharacters } from 'node:util';
 export const cleanText = (value: unknown) => stripVTControlCharacters(String(value)).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
-const commands = ['/help','/settings','/permissions','/runtime','/app','/connections','/agents','/agent','/new','/cwd','/skills','/skill','/use','/actions','/resume','/clear','/exit'];
+const commands = ['/help','/memory','/reflect','/settings','/permissions','/runtime','/app','/connections','/agents','/agent','/new','/cwd','/skills','/skill','/use','/actions','/resume','/clear','/exit'];
 const expand = (s: string) => path.resolve(s.replace(/^~(?=\/|$)/, os.homedir()));
 export async function chat(initialHome: string) {
   let home = await fs.realpath(initialHome), app = await readApp();
@@ -164,12 +167,13 @@ export async function chat(initialHome: string) {
       const text = output?.filter(c => c.type === 'text').map(c => c.text).join('\n');
       if (text) line(text.length > 3000 ? text.slice(0,3000) + '\n… display truncated' : text);
     }
+    else if (event.type === 'memory_active') console.log(dim(`Memory active: ${event.revision}${event.warning ? ' · '+event.warning : ''}`));
     else if (event.type === 'skill') console.log(purple(`Using skill: ${event.name}`));
     else if (event.type === 'recovery') console.log(color('38;5;179', `Recovering interrupted run ${event.requestId}`));
     else if (event.type === 'connection') console.log(dim(`MCP ${event.name}: ${event.status}${event.message ? ' · ' + event.message : ''}`));
     else if (event.type === 'connection_log') console.log(dim(`[${event.name}] ${event.text}`));
   };
-  const run = async (prompt: string, resumeOnly = false) => {
+  const run = async (prompt: string, resumeOnly = false, task?: (signal: AbortSignal) => Promise<string>) => {
     const controller = new AbortController();
     const keypress = (_text: string, key: { name?: string; ctrl?: boolean }) => {
       if (key?.name === 'escape' || (key?.ctrl && key?.name === 'c')) {
@@ -182,6 +186,7 @@ export async function chat(initialHome: string) {
     if (process.stdin.isTTY) { emitKeypressEvents(process.stdin); process.stdin.setRawMode(true); process.stdin.on('keypress', keypress); process.stdin.resume(); }
     try {
       console.log(dim('Working… Esc to stop'));
+      if (task) { const text = await task(controller.signal); panel('Memory reflection'); line(text); return; }
       const result = await runAgent({ home, prompt, requestId: randomUUID(), resumeOnly }, render, undefined, controller.signal, connections);
       panel(manifest.name); line(result.summary); console.log(dim(`${result.usage.inputTokens} in · ${result.usage.outputTokens} out · $${result.costUsd.toFixed(4)}`));
     } catch (error) {
@@ -201,7 +206,26 @@ export async function chat(initialHome: string) {
         if (!prompt.startsWith('/')) { await run(prompt); continue; }
         const space = prompt.indexOf(' '), cmd = space < 0 ? prompt : prompt.slice(0,space), arg = space < 0 ? '' : prompt.slice(space+1).trim();
         if (cmd === '/exit') break;
-        else if (cmd === '/help') { panel('Command palette'); line('/settings       Browse settings\n/permissions    Shell, file writes, MCP\n/runtime        Turn limit, compaction, timeout\n/app            Colors and startup banner\n/connections    Add and manage MCP servers\n/agents         Switch agents\n/agent NAME     Switch directly\n/new            Create an agent\n/cwd [PATH]     Choose working directory\n/skills         Installed skills\n/skill NAME     Read skill instructions\n/use NAME TASK  Ask agent to use a skill\n/actions        Recent tool outcomes\n/resume         Recover unfinished work\n/clear          Clear screen\n/exit           Leave harness'); }
+        else if (cmd === '/help') { panel('Command palette'); line('/settings       Browse settings\n/memory         Memory status, search, history, sync\n/reflect        Propose learning; list, apply ID, settings\n/permissions    Shell, file writes, MCP\n/runtime        Turn limit, compaction, timeout\n/app            Colors and startup banner\n/connections    Add and manage MCP servers\n/agents         Switch agents\n/agent NAME     Switch directly\n/new            Create an agent\n/cwd [PATH]     Choose working directory\n/skills         Installed skills\n/skill NAME     Read skill instructions\n/use NAME TASK  Ask agent to use a skill\n/actions        Recent tool outcomes\n/resume         Recover unfinished work\n/clear          Clear screen\n/exit           Leave harness'); }
+        else if (cmd === '/memory') {
+          panel('Memory');
+          let parts = arg.split(/\s+/).filter(Boolean);
+          if (!parts.length) { line(JSON.stringify(await memoryCommand(home,'status'),null,2)); line('status · browse · core · read PATH · search QUERY · recall QUERY · diff [REV] · history\nrefresh · migrate · commit REASON · revert REV · config [JSON] · bundle PATH · remote URL · push · pull'); parts=(await ask('Memory command (Enter returns) > ')).split(/\s+/).filter(Boolean); }
+          if(parts.length) line(JSON.stringify(await memoryCommand(home,parts[0],parts.slice(1)),null,2));
+        }
+        else if (cmd === '/reflect') {
+          const [action,id] = arg.split(/\s+/);
+          if(!action || action==='preview') await run('',false,async signal=>{const p=id?await previewReflection(home,id):await reflect(home,undefined,signal);return JSON.stringify(p.id==='none'?p:await previewReflection(home,p.id),null,2);});
+          else if(action==='list') line(JSON.stringify(await proposals(home),null,2));
+          else if(action==='apply') line(JSON.stringify(await applyReflection(home,id),null,2));
+          else if(action==='retry') await run('',false,async()=>JSON.stringify(await retryReflection(home,id),null,2));
+          else if(action==='discard') line(JSON.stringify(await discardReflection(home,id),null,2));
+          else if(action==='settings') {
+            line(JSON.stringify(await reflectionSettings(home),null,2));
+            const json=await ask('Reflection settings as JSON (Enter returns) > ');
+            if(json) { const release=await lockHome(home);const prior=await reflectionSettings(home);try { await saveState(home,'reflection-settings.json',JSON.parse(json));try{await reflectionSettings(home);}catch(e){await saveState(home,'reflection-settings.json',prior);throw e;} }finally{release();}line('Reflection settings saved.'); }
+          } else throw new Error('/reflect preview | list | apply ID | discard ID | retry ID | settings');
+        }
         else if (cmd === '/permissions') await permissions();
         else if (cmd === '/runtime') await runtime();
         else if (cmd === '/app') await appearance();
@@ -224,9 +248,9 @@ export async function chat(initialHome: string) {
         else if (cmd === '/resume') await run('',true);
         else if (cmd === '/clear') { if (process.stdout.isTTY) console.clear(); status(); }
         else if (cmd === '/settings') {
-          panel('Settings'); line('1  Permissions\n2  Runtime\n3  Working directory\n4  Connections\n5  Application\n6  Agents\n7  Skills\n8  Action history');
+          panel('Settings'); line('1  Permissions\n2  Runtime\n3  Working directory\n4  Connections\n5  Application\n6  Agents\n7  Skills\n8  Action history\n9  Memory\n10 Reflection budgets');
           const choice = await ask('Section (Enter returns) > ');
-          if (choice === '1') await permissions(); else if (choice === '2') await runtime(); else if (choice === '3') await changeCwd(); else if (choice === '4') await connectionMenu(); else if (choice === '5') await appearance(); else if (choice === '6') await switchAgent(); else if (choice === '7') { for (const s of await listSkills(home)) line(`${s.name}: ${s.description}`); } else if (choice === '8') showActions();
+          if (choice === '1') await permissions(); else if (choice === '2') await runtime(); else if (choice === '3') await changeCwd(); else if (choice === '4') await connectionMenu(); else if (choice === '5') await appearance(); else if (choice === '6') await switchAgent(); else if (choice === '7') { for (const s of await listSkills(home)) line(`${s.name}: ${s.description}`); } else if (choice === '8') showActions(); else if (choice === '9') { line(JSON.stringify(await memoryCommand(home,'status'),null,2)); line('Use /memory to browse and configure memory.'); } else if (choice === '10') { line(JSON.stringify(await reflectionSettings(home),null,2)); line('Use /reflect settings to adjust budgets.'); }
         } else throw new Error('Unknown slash command. Use /help.');
       } catch (error) { console.log(color('38;5;174', error instanceof Error ? error.message : error)); }
     }

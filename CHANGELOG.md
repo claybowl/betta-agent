@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Complete the MemFS upgrade: immutable committed core context, deferred indexes, automatic migration, configurable validation, and recoverable multi-file learning transactions.
+- Add agent-scoped conversation recall, memory search with provenance, and committed memory skills with legacy precedence.
+- Add bounded reflection proposals, preview/apply/retry, conflict retention, source-window deduplication, and a headless command for Doer routines.
+- Add memory settings/controls, history and revert, explicit remote sync, Git bundles and history-preserving exports/imports.
+- Preserve existing execution recovery and request deduplication. Existing agent homes migrate on first run; previous memory revisions remain in Git.
+
 ## 0.2.0 — 2026-11-11
 
 

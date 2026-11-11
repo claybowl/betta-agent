@@ -33,7 +33,7 @@ export async function lockHome(home: string): Promise<() => void> {
   return () => { db.exec("ROLLBACK"); db.close(); };
 }
 
-export async function initHome(home: string, name: string, model: string): Promise<AgentManifest> {
+export async function initHome(home: string, name: string, model: string, importedMemory = false): Promise<AgentManifest> {
   await fs.mkdir(home, { recursive: true });
   const release = await lockHome(home);
   try {
@@ -45,7 +45,7 @@ export async function initHome(home: string, name: string, model: string): Promi
     await fs.mkdir(path.join(home, "memory"), { recursive: true });
     await fs.mkdir(path.join(home, "skills"), { recursive: true });
     await fs.writeFile(path.join(home, "agent.json"), JSON.stringify(manifest, null, 2) + "\n", { flag: "wx" });
-    for (const [file, content] of Object.entries({
+    if (!importedMemory) for (const [file, content] of Object.entries({
       "MEMORY.md": "# Memory\n\nCore: persona.md, human.md\nReference: create indexed subdirectories as knowledge grows.\n",
       "persona.md": `# Identity\n\nI am ${name}.\n`,
       "human.md": "# Person I work with\n\nRecord durable preferences here when learned.\n",
@@ -118,7 +118,7 @@ export async function coreMemory(root: string): Promise<string> {
   return content;
 }
 
-export async function exportHome(home: string, destination: string, continuation: boolean): Promise<void> {
+export async function exportHome(home: string, destination: string, continuation: boolean, history = false): Promise<void> {
   home = await fs.realpath(home);
   destination = path.join(await fs.realpath(path.dirname(path.resolve(destination))), path.basename(destination));
   if (destination === home || destination.startsWith(home + path.sep)) throw new Error("Export destination must be outside the agent home");
@@ -130,14 +130,20 @@ export async function exportHome(home: string, destination: string, continuation
     const copyTree = async (source: string, target: string): Promise<void> => {
       await fs.mkdir(target, { recursive: true });
       for (const item of await fs.readdir(source, { withFileTypes: true })) {
-        if (item.name.startsWith(".")) continue;
+        if (item.name.startsWith(".") && item.name !== ".memfs.config.json") continue;
         if (item.isSymbolicLink()) throw new Error(`Export refuses symlink: ${item.name}`);
         const from = path.join(source, item.name), to = path.join(target, item.name);
         if (item.isDirectory()) await copyTree(from, to);
         else if (item.isFile()) await fs.copyFile(from, to);
       }
     };
-    await copyTree(path.join(home, "memory"), path.join(destination, "memory"));
+    if (history) {
+      const { git } = await import('./memfs.js');
+      if ((await git(path.join(home,'memory'),['status','--porcelain'])).trim()) throw new Error('Commit memory drafts before a history-preserving export');
+      const bundle=path.join(home,'state','export-'+randomUUID()+'.bundle');
+      try { await git(path.join(home,'memory'),['bundle','create',bundle,'--all']); await git(home,['clone','--',bundle,path.join(destination,'memory')]); await git(path.join(destination,'memory'),['fetch','--update-head-ok',bundle,'refs/heads/*:refs/heads/*']); await git(path.join(destination,'memory'),['remote','remove','origin']); }
+      finally { await fs.rm(bundle,{force:true}); }
+    } else await copyTree(path.join(home, "memory"), path.join(destination, "memory"));
     await copyTree(path.join(home, "skills"), path.join(destination, "skills"));
     // Settings travel with the agent; local connections require explicit activation on the receiving machine.
     try {
@@ -149,13 +155,18 @@ export async function exportHome(home: string, destination: string, continuation
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     if (!continuation) manifest.id = randomUUID();
     await fs.writeFile(path.join(destination, "agent.json"), JSON.stringify(manifest, null, 2) + "\n");
+    await fs.mkdir(path.join(destination,'state'),{recursive:true});
+    for (const name of ['reflection-settings.json', ...(continuation && history ? ['reflection-proposals.json','reflection-consumed.json'] : [])]) {
+      try { await fs.copyFile(path.join(home,'state',name),path.join(destination,'state',name)); } catch(e) { if((e as NodeJS.ErrnoException).code!=='ENOENT') throw e; }
+    }
     if (continuation) {
       const source = path.join(home, "state", "runtime.sqlite");
       await fs.access(source);
-      await fs.mkdir(path.join(destination, "state"));
+      await fs.mkdir(path.join(destination, "state"), { recursive: true });
       try { await fs.copyFile(path.join(home, "state", "actions.jsonl"), path.join(destination, "state", "actions.jsonl")); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const { DatabaseSync } = await import("node:sqlite");
+      try { const recallSource=path.join(home,'state','recall.sqlite');await fs.access(recallSource);const recallDb=new DatabaseSync(recallSource);try{recallDb.exec(`VACUUM INTO '${path.join(destination,'state','recall.sqlite').replaceAll("'","''")}'`);}finally{recallDb.close();} } catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
       const db = new DatabaseSync(source);
       try { db.exec(`VACUUM INTO '${path.join(destination, "state", "runtime.sqlite").replaceAll("'", "''")}'`); }
       finally { db.close(); }

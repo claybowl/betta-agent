@@ -28,7 +28,8 @@
     "dist",
     "README.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "LICENSE",
+    "MEMORY.md"
   ],
   "engines": {
     "node": ">=22.19.0"
