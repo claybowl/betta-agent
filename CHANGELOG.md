@@ -9,6 +9,9 @@
 - Report the agent's own token usage and cost to Doer after each run, best effort.
 - Remove known credentials from tool arguments written to the action journal.
 - Unfinished work now saves additional non-secret wake variables. State written by 0.3.0 is read unchanged; no migration.
+- Brand the terminal as DIS Betta Agents with a fish banner and a compatible betta-agents executable alias.
+- Add model and inference provider controls through /model and Settings.
+
 
 ## 0.3.0 — 2026-11-11
 

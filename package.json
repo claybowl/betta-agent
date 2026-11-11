@@ -1,7 +1,7 @@
 {
   "name": "donjon-agent",
   "version": "0.4.0",
-  "description": "Portable local agents with Markdown memory and durable Pi execution",
+  "description": "DIS Betta Agent Harness: portable stateful agents with durable memory",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -12,7 +12,8 @@
     "url": "https://github.com/claybowl/donjon-agent/issues"
   },
   "bin": {
-    "donjon-agent": "dist/cli.js"
+    "donjon-agent": "dist/cli.js",
+    "betta-agents": "dist/cli.js"
   },
   "exports": {
     ".": {
