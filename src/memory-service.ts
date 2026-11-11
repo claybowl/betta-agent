@@ -1,3 +1,4 @@
+import { memoryGraph } from './memory-graph.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { lockHome, readManifest } from './home.js';
@@ -7,6 +8,7 @@ export async function locked<T>(home:string,fn:()=>Promise<T>){const release=awa
 export async function memoryStatus(home:string){const root=path.join(home,'memory');const revision=await head(root);const active=await stateJson(home,'memory-active.json',null);let validation:string|undefined;try{await compileMemory(root);}catch(e){validation=String(e);}let remote:string|undefined;try{remote=(await git(root,['remote','get-url','origin'])).trim();}catch{}let tracking:string|undefined;try{tracking=(await git(root,['rev-list','--left-right','--count','HEAD...@{upstream}'])).trim();}catch{}return {revision,active,validation,dirty:(await git(root,['status','--porcelain'])).trim(),remote,tracking};}
 export async function memoryCommand(home:string,action:string,args:string[]=[]):Promise<unknown>{const root=path.join(home,'memory');
   if(action==='status'||!action)return memoryStatus(home);
+  if(action==='graph')return memoryGraph(root,args.join(' '));
   if(action==='browse')return (await compileMemory(root)).paths;
   if(action==='core')return compileMemory(root);
   if(action==='read'){const files=await committedFiles(root);if(!files.has(args[0]))throw new Error('Unknown committed memory file');return {revision:await head(root),path:args[0],content:files.get(args[0])};}

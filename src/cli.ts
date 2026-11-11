@@ -23,7 +23,7 @@ async function main() {
   }
   const home = path.resolve(homeArg);
   if (command === "memory") {
-    console.log(JSON.stringify(await memoryCommand(home,args[0]||'status',args.slice(1)),null,2));
+    const result=await memoryCommand(home,args[0]||'status',args.slice(1)); console.log(typeof result==='string'?result:JSON.stringify(result,null,2));
   } else if (command === "reflect") {
     const controller=new AbortController(); process.once('SIGTERM',()=>controller.abort());process.once('SIGINT',()=>controller.abort());
     const proposal=await reflect(home,undefined,controller.signal);

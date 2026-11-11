@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-11
+
+- Add ASCII memory maps with outgoing Markdown/wiki links and backlinks.
+- Add optional local historical archive retrieval through history_search and history_read.
+
 
 - Complete the MemFS upgrade: immutable committed core context, deferred indexes, automatic migration, configurable validation, and recoverable multi-file learning transactions.
 - Add agent-scoped conversation recall, memory search with provenance, and committed memory skills with legacy precedence.

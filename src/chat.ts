@@ -210,8 +210,8 @@ export async function chat(initialHome: string) {
         else if (cmd === '/memory') {
           panel('Memory');
           let parts = arg.split(/\s+/).filter(Boolean);
-          if (!parts.length) { line(JSON.stringify(await memoryCommand(home,'status'),null,2)); line('status · browse · core · read PATH · search QUERY · recall QUERY · diff [REV] · history\nrefresh · migrate · commit REASON · revert REV · config [JSON] · bundle PATH · remote URL · push · pull'); parts=(await ask('Memory command (Enter returns) > ')).split(/\s+/).filter(Boolean); }
-          if(parts.length) line(JSON.stringify(await memoryCommand(home,parts[0],parts.slice(1)),null,2));
+          if (!parts.length) { line(JSON.stringify(await memoryCommand(home,'status'),null,2)); line('status · graph [PATH] · browse · core · read PATH · search QUERY · recall QUERY · diff [REV] · history\nrefresh · migrate · commit REASON · revert REV · config [JSON] · bundle PATH · remote URL · push · pull'); parts=(await ask('Memory command (Enter returns) > ')).split(/\s+/).filter(Boolean); }
+          if(parts.length) { const result=await memoryCommand(home,parts[0],parts.slice(1)); line(typeof result==='string'?result:JSON.stringify(result,null,2)); }
         }
         else if (cmd === '/reflect') {
           const [action,id] = arg.split(/\s+/);
