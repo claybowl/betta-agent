@@ -6,10 +6,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/claybowl/donjon-agent.git"
+    "url": "git+https://github.com/claybowl/betta-agent.git"
   },
   "bugs": {
-    "url": "https://github.com/claybowl/donjon-agent/issues"
+    "url": "https://github.com/claybowl/betta-agent/issues"
   },
   "bin": {
     "donjon-agent": "dist/cli.js",
@@ -30,7 +30,8 @@
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
-    "MEMORY.md"
+    "MEMORY.md",
+    "DOER.md"
   ],
   "engines": {
     "node": ">=22.19.0"
