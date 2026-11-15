@@ -20,6 +20,7 @@ import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { Type } from "typebox";
 import { hash, lockHome, readManifest } from "./home.js";
+import { DoerClient, DOER_ORIGIN_ENV, DOER_RESTORED_ENV, cancelledRunFor, doerBriefing, doerConfig, doerExtension, doerStartup, reportCost, type DoerStartup, type DoerUsage } from "./doer.js";
 
 type UsageTotals = { inputTokens: number; outputTokens: number; cachedInputTokens: number; costUsd: number };
 const totals = (usage: { models: Record<string, { input: number; output: number; cacheRead: number; cost: { total: number } }> }): UsageTotals =>
@@ -60,6 +61,8 @@ export async function makeModels(model: string, baseUrl?: string): Promise<Model
 }
 
 export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedModels?: Models, signal?: AbortSignal, suppliedConnections?: Connections): Promise<RunResult> {
+  // Doer integration is on only when all four DOER_* variables are in the environment. Read before taking the lock.
+  const doer = doerConfig();
   const home = await fs.realpath(input.home);
   const manifest = await readManifest(home);
   const settings = await readSettings(home);
@@ -79,10 +82,15 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
   let starting: UsageTotals | undefined;
   let abortHandler: (() => void) | undefined;
   let abortWork: Promise<void> | undefined;
+  let doerStart: DoerStartup | undefined;
+  let doerUsage: DoerUsage | undefined;
+  const doerEnvBefore = new Map<string, string | undefined>();
+  let selectedModel = "";
   try {
     runSignal.throwIfAborted();
     await migrateMemory(home);
     const selected = input.model || manifest.model;
+    selectedModel = selected;
     const split = selected.indexOf("/");
     if (split < 1) throw new Error("Model must be provider/model-id");
     const models = suppliedModels || await makeModels(selected, input.baseUrl);
@@ -94,6 +102,14 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     const activity = new Activity(home, emit);
     await connections.sync(settings, cwd, emit, runSignal);
     runSignal.throwIfAborted();
+    const doerClient = doer ? new DoerClient(doer, runSignal) : undefined;
+    if (doerClient) {
+      doerStart = await doerStartup(doerClient, emit);
+      doerClient.runId = doerStart.runId;
+      // Give this run (and its shell tools) the wake variables Doer's other adapters pass; never the key.
+      for (const [key, value] of Object.entries(doerStart.wake)) if (!process.env[key]) { doerEnvBefore.set(key, process.env[key]); process.env[key] = value; }
+      runSignal.throwIfAborted();
+    }
     const permissions = { ...settings.permissions };
     if (input.allowShell !== undefined) { permissions.shell = input.allowShell; permissions.files = input.allowShell; }
     let currentRequestId = input.requestId || "recovery";
@@ -131,6 +147,13 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     const codeTools = permissions.shell && permissions.files ? (codemode.tools || []).map(t => activity.wrap(t)) : [];
     registry.install({ ...codemode, tools: codeTools });
     const allowedTools = [...coding, ...(memoryExtension.tools || []).map(t => activity.wrap(t)), activity.wrap(skillTool), ...mcpTools, ...codeTools];
+    if (doerClient && doerStart) {
+      const extension = doerExtension(doerClient, await doerBriefing(doerClient, doerStart, emit));
+      const doerTools = (extension.tools || []).map(t => activity.wrap(t));
+      registry.install({ ...extension, tools: doerTools });
+      allowedTools.push(...doerTools);
+      runSignal.throwIfAborted();
+    }
     class LiveEnvironment extends NodeExecutionEnv {
       override async exec(command: Parameters<NodeExecutionEnv['exec']>[0], options: Parameters<NodeExecutionEnv['exec']>[1], ctx: Parameters<NodeExecutionEnv['exec']>[2]) {
         const id = randomUUID();
@@ -176,7 +199,20 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     let recovered = false;
     let summary = "";
     let requestId = input.requestId || "";
+    // Under Doer the heartbeat run id is the request id, so a repeated wake of the same run executes once.
+    // Without a known run there is no stable id: the request still runs, but is not deduplicated.
+    if (doerStart && !requestId && !input.resumeOnly) requestId = doerStart.runId || randomUUID();
     let conversationId: ConversationId | undefined;
+    // A run Doer cancelled is not resumed. On Windows Doer's stop is a hard kill, indistinguishable from a crash locally.
+    const cancelledRun = state.pending && doerClient && doerStart ? await cancelledRunFor(doerClient, doerStart, state.pending.env || {}) : undefined;
+    if (state.pending && cancelledRun) {
+      const dropped = state.pending;
+      const conversation = await runtime.conversation(dropped.conversation, context);
+      await conversation?.abort(context);
+      await runtime.commit(async tx => { (await tx.doc(State)).pending = null; }, context);
+      emit({ type: "doer", event: "cancelled_work_dropped", requestId: dropped.requestId, runId: cancelledRun });
+      state = (await runtime.snapshot(State, context))!;
+    }
     if (state.pending) {
       const pending = state.pending;
       currentRequestId = pending.requestId;
@@ -189,7 +225,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       await pendingConversation?.configure({ cwd, maxTurns: settings.maxTurns, instructions: `${manifest.instructions}\n${input.instructions || ""}`, tools: allowedTools }, context);
       emit({ type: "recovery", requestId: pending.requestId });
       // Restore task attribution, but use the current worker's fresh credentials.
-      const keys = ["DOER_RUN_ID", "DOER_TASK_ID", "DOER_WAKE_REASON"];
+      const keys: readonly string[] = DOER_RESTORED_ENV;
       const saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
       for (const key of keys) { if (pending.env[key]) process.env[key] = pending.env[key]; else delete process.env[key]; }
       try { const pendingSubmission = await runtime.submission(pending.submission, context);
@@ -232,7 +268,8 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
         (await tx.doc(State)).pending = { submission, conversation: conversationId!, requestId, model: selected, cwd: cwd === home ? "@agent-home" : cwd,
           memory: memory === path.join(home, "memory") ? "@agent-memory" : memory,
           usageStart: starting!, prompt: input.prompt!,
-          env: Object.fromEntries(["DOER_RUN_ID", "DOER_TASK_ID", "DOER_WAKE_REASON"].flatMap(k => process.env[k] ? [[k, process.env[k]!]] : [])) };
+          // Non-secret attribution only. DOER_API_KEY is never saved: recovery uses the current process's key.
+          env: Object.fromEntries([...DOER_RESTORED_ENV, DOER_ORIGIN_ENV].flatMap(k => process.env[k] ? [[k, process.env[k]!]] : [])) };
         return submission;
       }, context);
       recordRecall(home,requestId,String(conversationId),'user',input.prompt!);
@@ -249,20 +286,26 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     const result: RunResult = { sessionId: String(conversationId || ""), requestId, summary: summary || "No unfinished work.", recovered,
       usage: { inputTokens: after.inputTokens - starting.inputTokens, outputTokens: after.outputTokens - starting.outputTokens,
         cachedInputTokens: after.cachedInputTokens - starting.cachedInputTokens }, costUsd: after.costUsd - starting.costUsd };
+    doerUsage = { model: selected, ...result.usage, costUsd: result.costUsd };
     emit({ type: "result", ...result });
     return result;
   } catch (error) {
     if (harness && starting) {
       const after = totals(await harness.usage(context));
-      emit({ type: "result", errorMessage: error instanceof Error ? error.message : String(error),
-        usage: { inputTokens: after.inputTokens - starting.inputTokens, outputTokens: after.outputTokens - starting.outputTokens,
-          cachedInputTokens: after.cachedInputTokens - starting.cachedInputTokens }, costUsd: after.costUsd - starting.costUsd });
+      const spent = { inputTokens: after.inputTokens - starting.inputTokens, outputTokens: after.outputTokens - starting.outputTokens,
+        cachedInputTokens: after.cachedInputTokens - starting.cachedInputTokens };
+      doerUsage = { model: selectedModel, ...spent, costUsd: after.costUsd - starting.costUsd };
+      emit({ type: "result", errorMessage: error instanceof Error ? error.message : String(error), usage: spent, costUsd: after.costUsd - starting.costUsd });
     }
     throw error;
   } finally {
     if (abortHandler) runSignal.removeEventListener("abort", abortHandler);
     signal?.removeEventListener("abort", forwardAbort);
     if (timeout) clearTimeout(timeout);
+    for (const [key, value] of doerEnvBefore) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    // Doer's process adapter reports no usage, so report it here. Best effort, bounded, and never fails the run;
+    // it uses its own client so a cancelled run still reports what it spent.
+    if (doer && doerStart && doerUsage) { const reporter = new DoerClient(doer); reporter.runId = doerStart.runId; await reportCost(reporter, doerStart, doerUsage, emit).catch(() => false); }
     try { await abortWork; await harness?.close(context); }
     finally { try { if (!suppliedConnections) await connections.close(); } finally { release(); } }
   }

@@ -90,9 +90,13 @@ Application appearance and known agent paths live in `~/.donjon/settings.json` (
 
 The application Git repository tracks software. Agent memory has separate history. Runtime databases and credentials do not belong in this repository. Updating or cloning the software does not copy or replace agent homes.
 
-A crash leaves work recoverable; an explicit Doer stop or timeout cancels the submission. A second owner receives a busy error. Request IDs deduplicate the same logical input. Arbitrary shell/API effects require their own duplicate prevention. This is trusted local execution, not a filesystem sandbox.
+A crash leaves work recoverable; an explicit stop or timeout cancels the submission. Under Doer, work that belonged to a run Doer cancelled is not resumed (see [Doer integration](DOER.md)). A second owner receives a busy error. Request IDs deduplicate the same logical input. Arbitrary shell/API effects require their own duplicate prevention. This is trusted local execution, not a filesystem sandbox.
 
 Copy exports create a new agent identity and fresh execution state. Continuations also preserve newly recorded conversation recall. Continuation exports preserve identity and create a consistent SQLite snapshot. Both preserve current memory, skills, and settings; use `--history` to preserve memory Git history. exported MCP connections are disabled and require reactivation. Copy exports reset the working directory; continuation exports keep it and include the action journal. Without `--history`, exported memory starts fresh Git history. Use Git clone/bundle separately for full memory history. Relocated pending work requires compatible tools; external workspace paths and absolute paths embedded in prior tool arguments are not rewritten. Review memory/transcripts before sharing.
+
+## Running under Doer
+
+Optional. When `DOER_API_URL`, `DOER_API_KEY`, `DOER_COMPANY_ID` and `DOER_AGENT_ID` are all set in the environment, `donjon-agent run HOME PROMPT` works as a Doer agent through Doer's built-in `process` adapter, with no changes to Doer: it takes its request ID from the Doer run, reads its wake context, uses Doer's approvals and issues through `doer_*` tools, and reports its own cost. Without those variables nothing changes. Setup, the standing heartbeat prompt and safety notes are in [DOER.md](DOER.md). Not yet run against a real Doer instance or on Windows.
 
 ## Development and releases
 
@@ -110,6 +114,6 @@ The package installs as `donjon-agent`. GitHub releases contain an installable `
 
 ## Source history
 
-Extracted from Doer commit `039226f5` on 2026-11-11. Relevant file history was retained; extraction rewrote commit IDs. The Doer adapter and its subprocess integration tests remain in Doer. This repository is the source of truth for future runtime changes.
+Extracted from Doer commit `039226f5` on 2026-11-11. Relevant file history was retained; extraction rewrote commit IDs. Doer's own adapters remain in Doer. This repository is the source of truth for future runtime changes.
 
 Memory map: `/memory graph` shows core and deferred files. `/memory graph PATH` shows outgoing Markdown/wiki links and backlinks; `/memory read PATH` opens a file. The map uses committed memory and does not infer relationships.

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — 2026-11-15
+
+- Add an optional Doer integration, active only when `DOER_API_URL`, `DOER_API_KEY`, `DOER_COMPANY_ID` and `DOER_AGENT_ID` are all set. Standalone behavior is unchanged without them.
+- Run as a Doer agent through Doer's built-in `process` adapter (`donjon-agent run HOME PROMPT`), with no changes to Doer. See DOER.md for setup and the standing heartbeat prompt.
+- Under Doer, use the heartbeat run ID as the request ID, read the run's wake context, and do not resume work that belonged to a run Doer cancelled. `run` and `resume` honor Doer's stop signal on macOS and Linux.
+- Add `doer_approval_*` tools backed by Doer's approvals (no local approval list, no approve/reject tool) and a small set of `doer_issue_*` tools. Each run checks this agent's rejected and returned approvals.
+- Report the agent's own token usage and cost to Doer after each run, best effort.
+- Remove known credentials from tool arguments written to the action journal.
+- Unfinished work now saves additional non-secret wake variables. State written by 0.3.0 is read unchanged; no migration.
+
 ## 0.3.0 — 2026-11-11
 
 - Add ASCII memory maps with outgoing Markdown/wiki links and backlinks.
