@@ -15,7 +15,7 @@ import { readActions } from './activity.js';
 import { Connections } from './connections.js';
 import { stripVTControlCharacters } from 'node:util';
 export const cleanText = (value: unknown) => stripVTControlCharacters(String(value)).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
-const commands = ['/help','/memory','/reflect','/settings','/permissions','/runtime','/app','/connections','/agents','/agent','/new','/cwd','/skills','/skill','/use','/actions','/resume','/clear','/exit'];
+const commands = ['/help','/model','/memory','/reflect','/settings','/permissions','/runtime','/app','/connections','/agents','/agent','/new','/cwd','/skills','/skill','/use','/actions','/resume','/clear','/exit'];
 const expand = (s: string) => path.resolve(s.replace(/^~(?=\/|$)/, os.homedir()));
 export async function chat(initialHome: string) {
   let home = await fs.realpath(initialHome), app = await readApp();
@@ -43,13 +43,16 @@ export async function chat(initialHome: string) {
   const status = () => console.log(`${purple(manifest.name)} ${dim('· ' + manifest.model + '\n' + (settings.cwd || home) + '\n/help' + '  ·  Tab completes commands  ·  Esc stops a running turn')}`);
   const banner = () => {
     if (app.banner) console.log(purple(String.raw`
-   ____   ___  ____
-  |  _ \ |_ _|/ ___|
-  | | | | | | \___ \
-  | |_| | | |  ___) |
-  |____/ |___||____/
+   ____  _____ _____ _____ _
+  | __ )| ____|_   _|_   _/ _ \
+  |  _ \|  _|   | |   | || |_| |
+  | |_) | |___  | |   | ||  _  |
+  |____/|_____| |_|   |_||_| |_|
 
+  BETTA AGENTS   ><(((o>
   Donjon Intelligence Systems
+  A little fish. A long memory.
+
 `));
     status();
   };
@@ -69,6 +72,17 @@ export async function chat(initialHome: string) {
     const [key, value] = answer.split(/\s+/);
     if (!['shell','files','mcp'].includes(key) || !['on','off'].includes(value)) throw new Error('Example: shell on');
     settings.permissions[key as keyof AgentSettings['permissions']] = value === 'on'; await save(); line('Permission saved.');
+  };
+  const modelMenu = async () => {
+    panel('Model & inference · ' + manifest.name);
+    line('Current: '+manifest.model+'\nProviders: ollama (local), openai, anthropic, openrouter, or another supported provider.\nCloud credentials come from provider environment variables; never paste API keys here.');
+    const provider=await ask('Inference provider (Enter returns) > '); if(!provider)return;
+    if(!/^[a-zA-Z0-9_-]+$/.test(provider))throw new Error('Enter a provider name such as ollama');
+    const id=await ask('Model ID (Enter returns) > '); if(!id)return;
+    if(/\s/.test(id))throw new Error('Model ID cannot contain spaces');
+    const release=await lockHome(home);
+    try { manifest={...await readManifest(home),model:provider+'/'+id}; await atomicJson(path.join(home,'agent.json'),manifest); } finally { release(); }
+    line('Saved '+manifest.model+'. Pending work retains its original model.');
   };
   const runtime = async () => {
     panel('Runtime · ' + manifest.name);
@@ -206,7 +220,8 @@ export async function chat(initialHome: string) {
         if (!prompt.startsWith('/')) { await run(prompt); continue; }
         const space = prompt.indexOf(' '), cmd = space < 0 ? prompt : prompt.slice(0,space), arg = space < 0 ? '' : prompt.slice(space+1).trim();
         if (cmd === '/exit') break;
-        else if (cmd === '/help') { panel('Command palette'); line('/settings       Browse settings\n/memory         Memory status, search, history, sync\n/reflect        Propose learning; list, apply ID, settings\n/permissions    Shell, file writes, MCP\n/runtime        Turn limit, compaction, timeout\n/app            Colors and startup banner\n/connections    Add and manage MCP servers\n/agents         Switch agents\n/agent NAME     Switch directly\n/new            Create an agent\n/cwd [PATH]     Choose working directory\n/skills         Installed skills\n/skill NAME     Read skill instructions\n/use NAME TASK  Ask agent to use a skill\n/actions        Recent tool outcomes\n/resume         Recover unfinished work\n/clear          Clear screen\n/exit           Leave harness'); }
+        else if (cmd === '/model') await modelMenu();
+        else if (cmd === '/help') { panel('Command palette'); line('/model          Choose model and inference provider\n/settings       Browse settings\n/memory         Memory status, search, history, sync\n/reflect        Propose learning; list, apply ID, settings\n/permissions    Shell, file writes, MCP\n/runtime        Turn limit, compaction, timeout\n/app            Colors and startup banner\n/connections    Add and manage MCP servers\n/agents         Switch agents\n/agent NAME     Switch directly\n/new            Create an agent\n/cwd [PATH]     Choose working directory\n/skills         Installed skills\n/skill NAME     Read skill instructions\n/use NAME TASK  Ask agent to use a skill\n/actions        Recent tool outcomes\n/resume         Recover unfinished work\n/clear          Clear screen\n/exit           Leave harness'); }
         else if (cmd === '/memory') {
           panel('Memory');
           let parts = arg.split(/\s+/).filter(Boolean);
@@ -249,8 +264,9 @@ export async function chat(initialHome: string) {
         else if (cmd === '/clear') { if (process.stdout.isTTY) console.clear(); status(); }
         else if (cmd === '/settings') {
           panel('Settings'); line('1  Permissions\n2  Runtime\n3  Working directory\n4  Connections\n5  Application\n6  Agents\n7  Skills\n8  Action history\n9  Memory\n10 Reflection budgets');
+          line('11 Model & inference');
           const choice = await ask('Section (Enter returns) > ');
-          if (choice === '1') await permissions(); else if (choice === '2') await runtime(); else if (choice === '3') await changeCwd(); else if (choice === '4') await connectionMenu(); else if (choice === '5') await appearance(); else if (choice === '6') await switchAgent(); else if (choice === '7') { for (const s of await listSkills(home)) line(`${s.name}: ${s.description}`); } else if (choice === '8') showActions(); else if (choice === '9') { line(JSON.stringify(await memoryCommand(home,'status'),null,2)); line('Use /memory to browse and configure memory.'); } else if (choice === '10') { line(JSON.stringify(await reflectionSettings(home),null,2)); line('Use /reflect settings to adjust budgets.'); }
+          if (choice === '11') await modelMenu(); else if (choice === '1') await permissions(); else if (choice === '2') await runtime(); else if (choice === '3') await changeCwd(); else if (choice === '4') await connectionMenu(); else if (choice === '5') await appearance(); else if (choice === '6') await switchAgent(); else if (choice === '7') { for (const s of await listSkills(home)) line(`${s.name}: ${s.description}`); } else if (choice === '8') showActions(); else if (choice === '9') { line(JSON.stringify(await memoryCommand(home,'status'),null,2)); line('Use /memory to browse and configure memory.'); } else if (choice === '10') { line(JSON.stringify(await reflectionSettings(home),null,2)); line('Use /reflect settings to adjust budgets.'); }
         } else throw new Error('Unknown slash command. Use /help.');
       } catch (error) { console.log(color('38;5;174', error instanceof Error ? error.message : error)); }
     }

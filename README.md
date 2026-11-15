@@ -1,4 +1,4 @@
-# Donjon Agent
+# Betta Agents
 
 A local agent harness built on Pi Durable. Agent identity and Markdown memory persist across conversations; execution checkpoints allow interrupted work to recover after a process crash.
 
@@ -117,3 +117,5 @@ The package installs as `donjon-agent`. GitHub releases contain an installable `
 Extracted from Doer commit `039226f5` on 2026-11-11. Relevant file history was retained; extraction rewrote commit IDs. Doer's own adapters remain in Doer. This repository is the source of truth for future runtime changes.
 
 Memory map: `/memory graph` shows core and deferred files. `/memory graph PATH` shows outgoing Markdown/wiki links and backlinks; `/memory read PATH` opens a file. The map uses committed memory and does not infer relationships.
+
+Betta Agents is the DIS Betta Agent Harness from Donjon Intelligence Systems. Installed releases provide both `betta-agents` and the compatible `donjon-agent` command. Agent homes are private user data and are never bundled with the software. Use `/model` or Settings → Model & inference to choose a provider and model ID; provider credentials remain in environment variables.
