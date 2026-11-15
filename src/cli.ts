@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { chat } from "./chat.js";
 import { initHome, readManifest, exportHome } from "./home.js";
 import { runAgent, type RunInput } from "./harness.js";
+import { doerConfig } from "./doer.js";
 const [command, homeArg, ...args] = process.argv.slice(2);
 async function main() {
   if (command === "worker") {
@@ -44,7 +45,13 @@ async function main() {
   } else if (command === "chat") {
     await chat(home);
   } else {
-    const result = await runAgent({ home, prompt: args[0], requestId: args[1] || randomUUID(), resumeOnly: command === "resume" });
+    // Under Doer's process adapter: take the request id from the Doer run, honor Doer's stop signal, and log
+    // integration events to stderr (Doer keeps stdout and stderr as the run log). Standalone is unchanged.
+    const doer = doerConfig();
+    const controller = new AbortController();
+    if (doer) process.once("SIGTERM", () => controller.abort(new Error("Run cancelled by Doer")));
+    const result = await runAgent({ home, prompt: args[0], requestId: args[1] || (doer ? undefined : randomUUID()), resumeOnly: command === "resume" },
+      doer ? event => { if (event.type === "doer") console.error(`[doer] ${JSON.stringify(event)}`); } : undefined, undefined, doer ? controller.signal : undefined);
     console.log(result.summary);
   }
 }

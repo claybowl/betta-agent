@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import type { Emit } from './harness.js';
+import { redact } from './recall.js';
 export type Action = { id: string; time: string; name: string; status: 'started' | 'completed' | 'error' | 'unknown'; detail?: string };
 export class Activity {
   constructor(readonly home: string, readonly emit: Emit) {}
@@ -16,14 +17,15 @@ export class Activity {
     return defineTool({ ...tool, execute: async (args, api, context) => {
       const id = randomUUID();
       // Persist intent before invoking anything that can have an external effect.
-      this.record({ id, name: tool.name, status: 'started', detail: JSON.stringify(args).slice(0, 2000) });
+      // Arguments are written with known credentials removed: a model can paste a secret into any tool call.
+      this.record({ id, name: tool.name, status: 'started', detail: redact(JSON.stringify(args)).slice(0, 2000) });
       try {
         const result = await tool.execute(args, api, context);
         this.record({ id, name: tool.name, status: result.isError ? 'error' : 'completed', detail: result.isError ? 'Tool returned an error; partial effects may remain.' : 'Tool returned a result. External effects may need verification.' });
         this.emit({ type: 'tool_result', name: tool.name, output: result.output });
         return result;
       } catch (error) {
-        this.record({ id, name: tool.name, status: 'unknown', detail: String(error) });
+        this.record({ id, name: tool.name, status: 'unknown', detail: redact(String(error)) });
         throw error;
       }
     } });
