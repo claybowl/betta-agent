@@ -13,7 +13,7 @@ export interface AgentSettings {
   permissions: { shell: boolean; files: boolean; mcp: boolean };
   connections: Connection[];
 }
-export interface AppSettings { version: 1; theme: 'purple' | 'plain'; banner: boolean; agentHomes: string[] }
+export interface AppSettings { version: 1; theme: 'magic' | 'purple' | 'plain'; banner: boolean; agentHomes: string[]; look?: 2 }
 export const configRoot = () => process.env.DONJON_CONFIG_DIR || path.join(os.homedir(), '.donjon');
 async function json(file: string): Promise<any> {
   try { return JSON.parse(await fs.readFile(file, 'utf8')); }
@@ -61,8 +61,10 @@ export async function saveSettings(home: string, settings: AgentSettings) {
   try { await atomicJson(path.join(home, 'settings.json'), settings); } finally { release(); }
 }
 export async function readApp(): Promise<AppSettings> {
-  const s = await json(path.join(configRoot(), 'settings.json')) ?? { version: 1, theme: 'purple', banner: true, agentHomes: [] };
-  if (s.version !== 1 || !['purple','plain'].includes(s.theme) || typeof s.banner !== 'boolean' || !Array.isArray(s.agentHomes) || s.agentHomes.some((h: unknown) => typeof h !== 'string')) throw new Error('Invalid application settings');
+  const s = await json(path.join(configRoot(), 'settings.json')) ?? { version: 1, theme: 'magic', banner: true, agentHomes: [], look: 2 };
+  if (s.version !== 1 || !['magic','purple','plain'].includes(s.theme) || typeof s.banner !== 'boolean' || !Array.isArray(s.agentHomes) || s.agentHomes.some((h: unknown) => typeof h !== 'string') || (s.look !== undefined && s.look !== 2)) throw new Error('Invalid application settings');
+  // Settings saved before the Magic City look carried the old default; move them over once. /theme purple restores it.
+  if (s.look !== 2) { if (s.theme === 'purple') s.theme = 'magic'; s.look = 2; }
   return s;
 }
 export async function saveApp(app: AppSettings) { await atomicJson(path.join(configRoot(), 'settings.json'), app); }

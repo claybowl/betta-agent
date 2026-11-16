@@ -1,4 +1,8 @@
-# Betta Agents
+<p align="center"><img src="assets/icon.png" width="160" alt="Betta Agents icon"></p>
+
+# Betta Agents (donjon-agent)
+
+*Small fish. Long memory.*
 
 A local agent harness built on Pi Durable. Agent identity and Markdown memory persist across conversations; execution checkpoints allow interrupted work to recover after a process crash.
 
@@ -33,12 +37,19 @@ export HOME NEW_DIRECTORY
 export HOME NEW_DIRECTORY --continuation
 ```
 
-Chat has a purple/grey theme, a startup banner, Tab completion, live command output, and settings screens. `NO_COLOR=1` or the plain theme disables colors. Escape (or Ctrl-C during a run) stops the whole current turn, including its running command; it does not undo effects. Ctrl-C at the input prompt exits.
+Chat opens with the Betta Agents wordmark in the Magic City theme (gold, flamingo, teal); `/theme` switches to Donjon purple or plain, and `NO_COLOR=1` disables colors. On an interactive terminal, typing `/` opens a command palette under the prompt: keep typing to filter, Up/Down to move, Tab to complete, Enter to run, Esc to close. `/model`, `/agents`, `/skills`, `/permissions`, `/runtime`, `/theme` and `/settings` open pickers you drive with the arrow keys; most filter as you type. Piped or scripted chat keeps the plain text prompts. Escape (or Ctrl-C during a run) stops the whole current turn, including its running command; it does not undo effects. Ctrl-C on an empty input line exits.
+
+`/model` lists the runtime catalog for every provider whose credentials are in your environment, then asks each provider's own models endpoint and marks what it reports as `● live` while you watch. `○ catalog` entries are known to the runtime but were not confirmed by the provider (aliases often are not). `◌ new` entries are offered by the provider but unknown to this runtime's catalog, so they cannot be selected until the pi-ai dependency is updated. Live checks run for Anthropic, OpenAI, OpenRouter, Google, Groq, xAI, Mistral, DeepSeek, Cerebras, Together, Fireworks and a reachable Ollama; other providers list from the catalog only. A key is sent only to its own provider.
+
+`/skills` reads `name` and `description` from SKILL.md frontmatter, including folded and multi-line descriptions, accepts `skill.md` in any letter case, and lists the folders under `HOME/skills` it passed over with the reason (symbolic link, no SKILL.md, file over 64 KB).
 
 | Slash command | Purpose |
 | --- | --- |
 | `/settings` | Browse settings sections |
 | `/permissions` | Toggle shell, file write/edit, and MCP access |
+| `/model [PROVIDER/ID]` | Pick a model from the live provider list, or set one directly |
+| `/login [PROVIDER]`, `/logout [PROVIDER]` | Save an API key or sign in with a ChatGPT subscription; remove a saved login |
+| `/goal [--rounds N] [--budget USD] OBJECTIVE` | Keep working until done, blocked, or a turn or spend limit |
 | `/runtime` | Model, maximum turns, compaction, run timeout |
 | `/cwd [PATH]` | Persist the agent's working directory; `home` resets |
 | `/connections` | Add, enable, disable, connect, remove, and inspect MCP servers |
@@ -48,6 +59,7 @@ Chat has a purple/grey theme, a startup banner, Tab completion, live command out
 | `/use NAME TASK` | Explicitly request an installed skill |
 | `/actions` | Inspect recent tool outcomes, including uncertain interruptions |
 | `/app` | Theme and startup banner |
+| `/theme [magic\|purple\|plain]` | Switch the color theme |
 | `/resume`, `/clear`, `/exit` | Recovery, clear screen, exit |
 
 Agent homes are discovered beside the current home, under `~/.donjon/agents`, and from previously opened paths. Duplicate agent names require a number or full path. Switching does not merge memory or conversations.
