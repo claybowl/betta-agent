@@ -1,135 +1,216 @@
 <p align="center"><img src="assets/banner.jpg" width="900" alt="Betta Agents: Small fish. Long memory."></p>
 
-<p align="center"><img src="assets/icon.png" width="120" alt="Betta Agents icon"></p>
+<p align="center">
+  <b>A terminal agent harness with long-term memory you can read, search and roll back.</b><br>
+  Built by <a href="https://donjon.agency">Donjon Intelligence Systems</a> · Works with <a href="https://doer.company">Doer</a> · MIT licensed
+</p>
 
-# Betta Agents (donjon-agent)
+---
 
-*Small fish. Long memory.*
+Betta Agents is a local agent harness: you give an agent a home folder, pick a model, and talk to it in your terminal. It runs commands, edits files and uses tools — and it keeps what it learns.
 
-A local agent harness built on Pi Durable. Agent identity and Markdown memory persist across conversations; execution checkpoints allow interrupted work to recover after a process crash.
+- **Memory that lasts.** Each agent's memory is plain Markdown in its own Git repository. Close the laptop, come back next week, and it still knows the project. You can read it, edit it, diff it and revert it.
+- **Work that survives crashes.** Runs are checkpointed. If the process dies mid-task, the next start picks up where it left off instead of starting over or repeating the same request.
+- **Any model.** Anthropic, OpenAI, OpenRouter, Google, Groq, NVIDIA, OpenCode, Z.ai, local Ollama and more, chosen from a live list.
+- **You hold the switches.** Shell access, file writes and outside tools are off until you turn them on.
 
-## Start
+## Contents
 
-Requires Node **22.19+**, Git, and an available model (Ollama locally or a provider API key).
+[Install](#install) · [Your first agent](#your-first-agent) · [Models and logins](#models-and-logins) · [Using it](#using-it) · [Goal mode](#goal-mode) · [Memory](#memory) · [Skills](#skills) · [Tools and MCP](#tools-and-mcp-servers) · [Safety model](#safety-model) · [Reference](#reference) · [Development](#development) · [Status](#status)
+
+## Install
+
+Requires **Node.js 22.19 or newer** and **Git**. Tested on macOS and Linux. Windows is not supported yet.
+
+**From a release** (recommended). Download `donjon-agent-<version>.tgz` and `SHA256SUMS` from [Releases](https://github.com/claybowl/betta-agent/releases), then:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+npm install -g ./donjon-agent-<version>.tgz
+```
+
+This installs two identical commands, `betta-agents` and `donjon-agent`.
+
+**From source:**
+
+```sh
+git clone https://github.com/claybowl/betta-agent.git
+cd betta-agent
+npm ci --ignore-scripts
+npm run build
+./donjon-agent --help
+```
+
+## Your first agent
+
+An agent is a folder (its *home*). Create one with a name and a model, then open a chat:
+
+```sh
+betta-agents init ~/.donjon/agents/scout "Scout" ollama/qwen3.5:9b
+betta-agents chat ~/.donjon/agents/scout
+```
+
+No local model? Use any provider instead, for example `openrouter/anthropic/claude-sonnet-4.5`, and sign in with `/login` once the chat opens. You can change the model at any time with `/model`.
+
+Type a message to give the agent work. Type `/` to open the command palette.
+
+## Models and logins
+
+**`/model`** opens a searchable list of every model the runtime knows. Type to filter (`nvidia`, `free`, `glm`…), arrow keys to move, Enter to pick.
+
+| Mark | Meaning |
+| --- | --- |
+| `● live` | The provider's own API lists this model right now |
+| `○ catalog` | Known to the runtime, not confirmed live |
+| `◌ new` | Offered by the provider, but this version can't run it yet |
+| `needs NVIDIA_API_KEY` | No credentials for that provider yet |
+| `free` | Costs nothing to use |
+
+Model names are `provider/model-id`. Some providers namespace their own IDs, so the provider can appear twice — for example `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b`. If you type a name that doesn't exist, Betta refuses it and suggests the closest matches.
+
+**`/login`** saves a provider API key once, so you don't have to export it in every shell. Keys are typed hidden and stored in `~/.donjon/credentials.json`, readable only by you. Environment variables such as `OPENAI_API_KEY` or `NVIDIA_API_KEY` keep working and need no login. `/logout` removes a saved login.
+
+**Subscriptions.** `/login openai` offers *Sign in with ChatGPT*, which uses your ChatGPT plan's allowance instead of API billing. Claude Pro/Max sign-in is not offered: Anthropic's terms reserve it for Claude Code and claude.ai. Use an Anthropic API key instead.
+
+**Local models.** Ollama is used at `http://localhost:11434/v1` by default; set `OLLAMA_BASE_URL` to point elsewhere.
+
+## Using it
+
+Type `/` and the palette appears under the prompt. Keep typing to filter, Tab to complete, Enter to run, Esc to close. **Esc during a turn stops it**, including any command it is running. Ctrl-C on an empty line exits.
+
+| Command | What it does |
+| --- | --- |
+| `/model [PROVIDER/ID]` | Pick a model, or set one directly |
+| `/login [PROVIDER]` · `/logout` | Save or remove a provider login |
+| `/goal OBJECTIVE` | Keep working until done — see [Goal mode](#goal-mode) |
+| `/agents` · `/agent NAME` · `/new` | Switch agents or create one |
+| `/skills` · `/skill NAME` · `/use NAME TASK` | Browse skills, read one, or ask the agent to use one |
+| `/memory` | Inspect, search and sync memory |
+| `/reflect` | Have the agent propose what it should remember |
+| `/permissions` | Shell, file writes, MCP tools |
+| `/connections` | Add and manage MCP servers |
+| `/cwd [PATH]` | Set the folder the agent works in |
+| `/runtime` | Turn limit, compaction, timeout |
+| `/actions` | Recent tool calls and their outcomes |
+| `/resume` | Continue work interrupted by a crash |
+| `/settings` · `/theme` · `/app` | Settings, colors (`magic`, `purple`, `plain`), startup banner |
+| `/clear` · `/exit` | Clear the screen, leave |
+
+Set `NO_COLOR=1` for no colors, or `DONJON_NO_MOTION=1` to skip the startup animation.
+
+## Goal mode
+
+Give the agent an objective and let it run:
+
+```text
+/goal --rounds 6 --budget 1.50 get the test suite passing and summarize what changed
+```
+
+The agent takes turn after turn without asking you questions, and ends each turn with a status line: done, continue, or blocked (with what it needs). The loop stops when it reports done or blocked, after the turn limit, or once the spend limit is reached. Defaults are 8 turns and $2. Esc stops it at any point.
+
+## Memory
+
+Each agent's memory lives in `HOME/memory/` as Markdown files under their own Git history:
+
+- **Core memory** (identity, preferences, a routing index) is loaded into every turn.
+- **Deeper files** stay out of context until the agent reads them, so memory can grow without crowding the prompt.
+- Every change is a checked Git commit. Interrupted updates are recovered on restart.
+
+`/memory` shows status, searches, opens files, shows history and diffs, reverts, and syncs to a Git remote. `/memory graph` maps links between files.
+
+`/reflect` asks the agent to review recent conversations and propose memory changes, each tied to the conversation it came from. Nothing changes until you apply the proposal.
+
+Full details — budgets, migration, recovery and sync — are in the [memory guide](MEMORY.md).
+
+## Skills
+
+A skill is a folder with a `SKILL.md` describing how to do something. Put skills in `HOME/memory/skills/<name>/SKILL.md` and commit them with the agent's memory (the older `HOME/skills/` location still works).
+
+The agent sees each skill's name and `description` and loads the full instructions only when it needs them. `/skills` lists what's installed, and also lists any folder it skipped with the reason. Skills never grant extra permissions.
+
+## Tools and MCP servers
+
+With permissions on, the agent can run shell commands and edit files. It can also use tools from [MCP](https://modelcontextprotocol.io) servers:
+
+1. `/connections` → add a local (stdio) or remote (Streamable HTTP) server.
+2. Enable it, then turn MCP on in `/permissions`.
+
+Secrets are referenced by environment-variable name, never stored in settings. Not yet supported: MCP OAuth, the legacy SSE transport, and resource and prompt browsing.
+
+## Safety model
+
+Read this before turning on the shell.
+
+- **Off by default.** New agents start with shell, file writes and MCP disabled. Memory and reading files always work.
+- **Not a sandbox.** The switches control which tools the agent gets. With the shell on, the agent can do anything your user account can, including changing files when file tools are off.
+- **Evidence, not guarantees.** Every tool call is written to `state/actions.jsonl` before it starts and confirmed when it returns. If a run is interrupted mid-call, that call is marked *unknown*: check the outside effect before retrying. Shell commands and API calls are not exactly-once.
+- **One owner at a time.** Two processes can't drive the same agent at once; the second gets a busy error.
+- **Your data stays yours.** Agent homes, memory and credentials are never part of the software, a release or this repository.
+
+## Reference
+
+### Command line
+
+```text
+betta-agents init HOME NAME PROVIDER/MODEL     create an agent
+betta-agents chat HOME                         interactive terminal
+betta-agents run HOME PROMPT [REQUEST_ID]      one headless turn
+betta-agents resume HOME                       finish interrupted work
+betta-agents inspect HOME                      show identity and state
+betta-agents export HOME NEW_DIR [--continuation] [--history]
+betta-agents memory HOME COMMAND [ARGS]
+betta-agents reflect HOME [--apply]
+```
+
+`run` with the same `REQUEST_ID` executes once, however many times it is started.
+
+### Agent home layout
+
+```text
+agent.json              name, model, instructions
+settings.json           permissions, working directory, connections, limits
+memory/                 Markdown memory with its own Git history
+memory/skills/          skills, stored with memory
+state/actions.jsonl     tool-call receipts
+state/runtime.sqlite    transcripts and recovery state
+state/owner.sqlite      single-owner lock
+```
+
+App-wide settings live in `~/.donjon/` (`settings.json`, `credentials.json`). Set `DONJON_CONFIG_DIR` to move it.
+
+### Exporting an agent
+
+`export` copies an agent to a new folder. A plain export creates a **new agent** with the same memory, skills and settings. `--continuation` keeps the **same identity** and its conversation state. `--history` also keeps memory's Git history. Exported MCP connections are switched off. Review memory and transcripts before sharing an export.
+
+### Running under Doer
+
+Betta agents can run as workers in [Doer](https://doer.company), an agent orchestration platform. Set `DOER_API_URL`, `DOER_API_KEY`, `DOER_COMPANY_ID` and `DOER_AGENT_ID`, and `run` picks up Doer's tasks, approvals and issues, and reports its own cost. Without those variables nothing changes. See [DOER.md](DOER.md).
+
+## Development
 
 ```sh
 npm ci --ignore-scripts
-npm run build
-./donjon-agent chat "$HOME/.donjon/agents/dondog"
+npm run check                       # typecheck, tests, package install check
+python3 scripts/terminal-smoke.py   # real-terminal keyboard test (macOS/Linux)
 ```
 
-Existing DonDog homes work directly. To create another agent:
+TypeScript, Node 22.19+. Dependencies are pinned in `npm-shrinkwrap.json`. Releases are cut from tags by GitHub Actions; see [RELEASING.md](RELEASING.md). Changes are listed in the [changelog](CHANGELOG.md).
 
-```sh
-./donjon-agent init "$HOME/.donjon/agents/my-agent" 'My Agent' ollama/qwen3.5:9b
-./donjon-agent chat "$HOME/.donjon/agents/my-agent"
-```
+Contributions are welcome. Open an issue first for anything large. Run `npm run check` before sending a pull request.
 
-Use an Ollama model installed on your machine. Ollama defaults to localhost:11434/v1; override OLLAMA_BASE_URL if needed. For other providers set their API key in your environment and choose provider/model-id. Credentials remain outside the manifest.
+## Status
 
-## Commands
+Pre-1.0: state formats and commands may still change between minor versions, and every change is noted in the changelog with migration steps.
 
-```text
-init HOME NAME PROVIDER/MODEL
-chat HOME                         interactive slash-command interface
-run HOME PROMPT [REQUEST_ID]
-resume HOME
-inspect HOME
-export HOME NEW_DIRECTORY
-export HOME NEW_DIRECTORY --continuation
-```
+Known limits:
 
-Chat opens with the Betta Agents wordmark in the Magic City theme (gold, flamingo, teal); `/theme` switches to Donjon purple or plain, and `NO_COLOR=1` disables colors. On an interactive terminal, typing `/` opens a command palette under the prompt: keep typing to filter, Up/Down to move, Tab to complete, Enter to run, Esc to close. `/model`, `/agents`, `/skills`, `/permissions`, `/runtime`, `/theme` and `/settings` open pickers you drive with the arrow keys; most filter as you type. Piped or scripted chat keeps the plain text prompts. Escape (or Ctrl-C during a run) stops the whole current turn, including its running command; it does not undo effects. Ctrl-C on an empty input line exits.
+- Windows is not supported yet.
+- *Sign in with ChatGPT* has been verified only up to the browser step.
+- Saved logins are stored in an owner-only file, not the system keychain.
+- The Doer integration is tested against a simulated Doer API only.
 
-`/model` lists the runtime catalog for every provider whose credentials are in your environment, then asks each provider's own models endpoint and marks what it reports as `● live` while you watch. `○ catalog` entries are known to the runtime but were not confirmed by the provider (aliases often are not). `◌ new` entries are offered by the provider but unknown to this runtime's catalog, so they cannot be selected until the pi-ai dependency is updated. Live checks run for Anthropic, OpenAI, OpenRouter, Google, Groq, xAI, Mistral, DeepSeek, Cerebras, Together, Fireworks and a reachable Ollama; other providers list from the catalog only. A key is sent only to its own provider.
+## Credits and license
 
-`/skills` reads `name` and `description` from SKILL.md frontmatter, including folded and multi-line descriptions, accepts `skill.md` in any letter case, and lists the folders under `HOME/skills` it passed over with the reason (symbolic link, no SKILL.md, file over 64 KB).
+Betta Agents is built by [Donjon Intelligence Systems](https://donjon.agency) on the [Pi](https://github.com/earendil-works/pi) agent runtime (`pi-ai`, `pi-durable`). The memory layout follows the core/deferred design of Letta's MemFS; the implementation is original. Originally extracted from Doer.
 
-| Slash command | Purpose |
-| --- | --- |
-| `/settings` | Browse settings sections |
-| `/permissions` | Toggle shell, file write/edit, and MCP access |
-| `/model [PROVIDER/ID]` | Pick a model from the live provider list, or set one directly |
-| `/login [PROVIDER]`, `/logout [PROVIDER]` | Save an API key or sign in with a ChatGPT subscription; remove a saved login |
-| `/goal [--rounds N] [--budget USD] OBJECTIVE` | Keep working until done, blocked, or a turn or spend limit |
-| `/runtime` | Model, maximum turns, compaction, run timeout |
-| `/cwd [PATH]` | Persist the agent's working directory; `home` resets |
-| `/connections` | Add, enable, disable, connect, remove, and inspect MCP servers |
-| `/agents`, `/agent NAME` | Switch agent homes without restarting |
-| `/new` | Create and switch to another agent |
-| `/skills`, `/skill NAME` | List skills or read their instructions |
-| `/use NAME TASK` | Explicitly request an installed skill |
-| `/actions` | Inspect recent tool outcomes, including uncertain interruptions |
-| `/app` | Theme and startup banner |
-| `/theme [magic\|purple\|plain]` | Switch the color theme |
-| `/resume`, `/clear`, `/exit` | Recovery, clear screen, exit |
-
-Agent homes are discovered beside the current home, under `~/.donjon/agents`, and from previously opened paths. Duplicate agent names require a number or full path. Switching does not merge memory or conversations.
-
-### Permissions and runtime
-
-New homes start with shell, file modification, and MCP disabled. Existing homes without settings inherit `allowShell` from agent.json. Once settings.json exists, its permission switches take precedence; explicit worker `allowShell` overrides shell and file permissions for that run. Memory read/write and ordinary file reading remain available. Shell access can modify files even when the dedicated file tools are disabled. MCP servers execute with their own access. These are trusted tool-access controls, **not a filesystem sandbox** or per-command approval system. Code mode is available only when shell and file modification are both enabled.
-
-Settings changes acquire the same ownership lock as runs. They apply to the next run; another active owner blocks changes. Runtime timeout 0 means unlimited. Changing the working directory selects a separate conversation within the same agent memory. Pending work must first be recovered with its original model and external workspace; restore those settings if a recovery check rejects a change.
-
-### Connections
-
-`/connections` supports local **stdio** servers and remote **Streamable HTTP** servers. Add a server, enable it, turn MCP on in `/permissions`, then connect (or start a run). Active means a live connection in this chat session; enabled is the saved preference. Headless workers connect only for the run and close afterward. Errors are shown separately. Settings changes or switching agents close current connections.
-
-Stdio takes an executable and a JSON argument array, without a shell. Environment mappings reference names, e.g. `{"API_KEY":"MY_SERVICE_KEY"}`; HTTP bearer authentication likewise references a local environment variable. Do not put secrets in URLs or command arguments. OAuth login flows, legacy SSE transport, MCP resource browsing, and prompt catalogs are not implemented. Tools are discovered, namespaced, passed to the model with their input schemas, and recorded in action history. MCP tools are deliberately unsafe to replay after a crash: server annotations cannot guarantee an external effect was not already applied. Cancellation sends a request to the server; remote work may still finish.
-
-### Skills and action evidence
-
-Install `memory/skills/<name>/SKILL.md` in the agent memory repository and commit it; legacy `skills/<name>/SKILL.md` remains supported. Committed memory skills take precedence over legacy names. A bounded legacy catalog (up to 100 skills, four directory levels, files up to 64 KB) and the validated memory skill catalog is refreshed in the system context before each model request. Symlinks and hidden directories are ignored. YAML-style `description:` metadata supplies the catalog summary. The `skill_read` tool loads instructions on demand and records usage. This proves which instructions were loaded, not perfect model compliance. Skills never grant tool permissions.
-
-Action intent is flushed to `state/actions.jsonl` before a tool starts. A completion receipt means the tool returned; it does not independently prove every external effect. Errors may leave partial effects. Missing receipts and interrupted calls are **unknown**. Inspect files or the external service before retrying uncertain work. Journals may include command arguments and should be treated as private agent state. The UI strips terminal control sequences from tool output.
-
-## Agent homes
-
-```text
-agent.json             identity, model, instructions, allowShell
-memory/                authoritative Markdown memory, with its own Git history
-settings.json          per-agent runtime, working directory, permissions, connections
-memory/.memfs.config.json  memory structure, size and read-only constraints
-memory/skills/         agent skills stored with memory
-skills/                legacy skills; memory skills take precedence
-state/actions.jsonl    local action receipts and interruption evidence
-state/runtime.sqlite   transcripts, submissions, tool results, recovery state
-state/owner.sqlite     exclusive process-ownership lock
-```
-
-Core memory is compiled from one validated Git revision per turn, including after compaction. Existing homes migrate automatically on their next run; originals remain in Git. Deeper references stay out of context until read. Memory limits and read-only paths are configurable; defaults are 24,000 core characters and 20,000 characters per file, with a model-dependent context allowance. Memory changes use checked multi-file Git transactions; interrupted updates recover on restart. `/memory` provides inspection, search, history, synchronization and bundles. `/reflect` creates an evidence-backed proposal; apply it explicitly or use the headless `reflect HOME --apply` command from a Doer routine. See [Memory architecture and operations](MEMORY.md) for budgets, migration, recovery and limits.
-
-Application appearance and known agent paths live in `~/.donjon/settings.json` (override the directory with `DONJON_CONFIG_DIR`).
-
-The application Git repository tracks software. Agent memory has separate history. Runtime databases and credentials do not belong in this repository. Updating or cloning the software does not copy or replace agent homes.
-
-A crash leaves work recoverable; an explicit stop or timeout cancels the submission. Under Doer, work that belonged to a run Doer cancelled is not resumed (see [Doer integration](DOER.md)). A second owner receives a busy error. Request IDs deduplicate the same logical input. Arbitrary shell/API effects require their own duplicate prevention. This is trusted local execution, not a filesystem sandbox.
-
-Copy exports create a new agent identity and fresh execution state. Continuations also preserve newly recorded conversation recall. Continuation exports preserve identity and create a consistent SQLite snapshot. Both preserve current memory, skills, and settings; use `--history` to preserve memory Git history. exported MCP connections are disabled and require reactivation. Copy exports reset the working directory; continuation exports keep it and include the action journal. Without `--history`, exported memory starts fresh Git history. Use Git clone/bundle separately for full memory history. Relocated pending work requires compatible tools; external workspace paths and absolute paths embedded in prior tool arguments are not rewritten. Review memory/transcripts before sharing.
-
-## Running under Doer
-
-Optional. When `DOER_API_URL`, `DOER_API_KEY`, `DOER_COMPANY_ID` and `DOER_AGENT_ID` are all set in the environment, `donjon-agent run HOME PROMPT` works as a Doer agent through Doer's built-in `process` adapter, with no changes to Doer: it takes its request ID from the Doer run, reads its wake context, uses Doer's approvals and issues through `doer_*` tools, and reports its own cost. Without those variables nothing changes. Setup, the standing heartbeat prompt and safety notes are in [DOER.md](DOER.md). Not yet run against a real Doer instance or on Windows.
-
-## Development and releases
-
-```sh
-npm run check                     # typecheck, tests, package install/API smoke test
-python3 scripts/terminal-smoke.py  # optional real PTY Escape test (macOS/Linux)
-npm run release:prepare -- 0.1.1   # prepare a new version and release notes
-```
-
-[Release process](RELEASING.md) · [Changelog](CHANGELOG.md) · [Doer integration](DOER.md)
-
-The package installs as `donjon-agent`. GitHub releases contain an installable `.tgz` and SHA256SUMS. Public npm publishing is disabled.
-
-[Memory guide](MEMORY.md) covers `/memory`, `/reflect`, history bundles, remote synchronization, and scheduling reflection through Doer.
-
-## Source history
-
-Extracted from Doer commit `039226f5` on 2026-11-11. Relevant file history was retained; extraction rewrote commit IDs. Doer's own adapters remain in Doer. This repository is the source of truth for future runtime changes.
-
-Memory map: `/memory graph` shows core and deferred files. `/memory graph PATH` shows outgoing Markdown/wiki links and backlinks; `/memory read PATH` opens a file. The map uses committed memory and does not infer relationships.
-
-Betta Agents is the DIS Betta Agent Harness from Donjon Intelligence Systems. Installed releases provide both `betta-agents` and the compatible `donjon-agent` command. Agent homes are private user data and are never bundled with the software. Use `/model` or Settings → Model & inference to choose a provider and model ID; provider credentials remain in environment variables.
+[MIT License](LICENSE).

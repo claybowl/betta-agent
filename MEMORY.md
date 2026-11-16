@@ -1,6 +1,6 @@
 # Memory architecture and operations
 
-Donjon memory follows Letta's MemFS v2 core/deferred layout. Markdown and Git are authoritative. SQLite recall is a separate evidence store. The implementation is original; the source comparison is recorded in the local Letta research report.
+Betta memory follows Letta's MemFS v2 core/deferred layout. Markdown and Git are authoritative. SQLite recall is a separate evidence store. The implementation is original.
 
 ## Storage
 
