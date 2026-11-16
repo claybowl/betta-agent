@@ -16,7 +16,7 @@ import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { createProvider, type Models } from "@earendil-works/pi-ai";
-import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import { appModels } from "./credentials.js";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { Type } from "typebox";
 import { hash, lockHome, readManifest } from "./home.js";
@@ -44,7 +44,7 @@ export interface RunResult {
 export type Emit = (event: Record<string, unknown>) => void;
 
 export async function makeModels(model: string, baseUrl?: string): Promise<Models> {
-  const models = builtinModels();
+  const models = appModels();
   const slash = model.indexOf("/");
   const provider = model.slice(0, slash), id = model.slice(slash + 1);
   if (provider === "ollama") {

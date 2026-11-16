@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0 — 2026-11-16
+
+- Bigger startup banner: BETTA AGENTS in a heavy, wide block face on terminals 76 columns or wider, revealed with a short slanted wipe and glint. Set `DONJON_NO_MOTION=1` to skip the animation; narrower terminals keep the earlier wordmark.
+- Add `/login` and `/logout`: paste a provider API key once (hidden as you type) or sign in with a ChatGPT subscription; logins are saved owner-only in `~/.donjon/credentials.json`, so keys no longer have to be exported in every shell. Claude Pro/Max sign-in is not offered because Anthropic's terms reserve it for Claude Code and claude.ai.
+- Add `/goal [--rounds N] [--budget USD] OBJECTIVE`: the agent keeps taking turns until it reports done or blocked, or the turn or spend limit (default 8 turns, $2) stops it. Esc stops the loop.
+- `/model` no longer saves a model it cannot find: typed refs are checked against the catalog (split on the first slash only, so `nvidia/nvidia/nemotron-…` is valid), unknown refs are refused with "did you mean" suggestions, and a missing provider key is called out before the first run.
+- The model picker lists providers that have no key in the current shell, marked `needs <ENV_VAR>` and ordered after configured ones (OpenCode, Z.ai, OpenRouter and NVIDIA lead the keyless list); free models are tagged.
+- A saved model that cannot run is reported at startup and after switching agents, and "Provider is not configured" run failures name the variable to export.
+- Rebrand the chat interface as Betta Agents with a new wordmark and the Magic City theme (gold, flamingo, teal). Donjon purple and plain remain under `/theme`. Application settings saved before this change move from purple to Magic City once.
+- Typing `/` on an interactive terminal opens a command palette with arrow-key selection, filtering, Tab completion and Enter to run.
+- Add `/model`: a filterable picker that lists the runtime catalog for providers with credentials and marks models live as each provider's API answers. Models the provider offers but the runtime catalog lacks are shown and cannot be selected.
+- Replace the typed menus for agents, skills, permissions, runtime, theme and settings with arrow-key pickers. `/new` suggests a home under the config directory and picks the model from the same list. Scripted (piped) chat is unchanged.
+- Show a spinner with elapsed time and the current tool while a turn runs.
+- Skills: read frontmatter properly (folded and multi-line descriptions, quoted values), accept `skill.md` in any letter case, and report skipped folders with the reason.
+
 ## 0.4.0 — 2026-11-15
 
 - Add an optional Doer integration, active only when `DOER_API_URL`, `DOER_API_KEY`, `DOER_COMPANY_ID` and `DOER_AGENT_ID` are all set. Standalone behavior is unchanged without them.
