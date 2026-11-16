@@ -1,4 +1,6 @@
-<p align="center"><img src="assets/icon.png" width="160" alt="Betta Agents icon"></p>
+<p align="center"><img src="assets/banner.jpg" width="900" alt="Betta Agents: Small fish. Long memory."></p>
+
+<p align="center"><img src="assets/icon.png" width="120" alt="Betta Agents icon"></p>
 
 # Betta Agents (donjon-agent)
 
