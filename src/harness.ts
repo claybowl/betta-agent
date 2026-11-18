@@ -37,7 +37,7 @@ const State = defineDoc<{ conversations: Record<string, ConversationId>; pending
 });
 export interface RunInput {
   home: string; cwd?: string; memoryDir?: string; model?: string; baseUrl?: string;
-  prompt?: string; requestId?: string; sessionKey?: string; instructions?: string; resumeOnly?: boolean; allowShell?: boolean;
+  prompt?: string; requestId?: string; sessionKey?: string; instructions?: string; resumeOnly?: boolean; costReporter?: "adapter"; allowShell?: boolean;
 }
 export interface RunResult {
   sessionId: string; requestId: string; summary: string; recovered: boolean;
@@ -336,7 +336,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     for (const [key, value] of doerEnvBefore) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     // Doer's process adapter reports no usage, so report it here. Best effort, bounded, and never fails the run;
     // it uses its own client so a cancelled run still reports what it spent.
-    if (doer && doerStart && doerUsage) { const reporter = new DoerClient(doer); reporter.runId = doerStart.runId; await reportCost(reporter, doerStart, doerUsage, emit).catch(() => false); }
+    if (input.costReporter !== "adapter" && doer && doerStart && doerUsage) { const reporter = new DoerClient(doer); reporter.runId = doerStart.runId; await reportCost(reporter, doerStart, doerUsage, emit).catch(() => false); }
     try { await abortWork; await harness?.close(context); }
     finally { try { if (!suppliedConnections) await connections.close(); } finally { release(); } }
   }

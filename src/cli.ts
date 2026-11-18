@@ -10,12 +10,24 @@ import { runAgent, type RunInput } from "./harness.js";
 import { doerConfig } from "./doer.js";
 const [command, homeArg, ...args] = process.argv.slice(2);
 async function main() {
-  if (command === "worker") {
+  if (command === "doer-worker" && homeArg === "--protocol") {
+    console.log("betta-doer/1");
+    return;
+  }
+  if (command === "worker" || command === "doer-worker") {
     let raw = "";
     for await (const chunk of process.stdin) raw += chunk;
     const controller = new AbortController();
     process.once("SIGTERM", () => controller.abort(new Error("Worker cancelled")));
-    await runAgent(JSON.parse(raw) as RunInput, event => process.stdout.write(JSON.stringify(event) + "\n"), undefined, controller.signal);
+    const input = JSON.parse(raw) as RunInput & { agentName?: string };
+    if (command === "doer-worker") {
+      if (!doerConfig() || !process.env.DOER_RUN_ID || input.requestId !== process.env.DOER_RUN_ID)
+        throw new Error("Betta requires an authenticated Doer run with a matching request ID.");
+      if (!input.model || !input.agentName) throw new Error("Betta requires an agent name and provider/model.");
+      await initHome(input.home, input.agentName, input.model);
+      input.costReporter = "adapter";
+    }
+    await runAgent(input, event => process.stdout.write(JSON.stringify(event) + "\n"), undefined, controller.signal);
     return;
   }
   if (!homeArg || !["init", "chat", "run", "resume", "export", "inspect", "memory", "reflect", "memory-import"].includes(command || "")) {

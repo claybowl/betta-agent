@@ -222,6 +222,17 @@ export function doerExtension(client: DoerClient, briefing: string) {
       parameters: Type.Object({ status: Type.Optional(Type.Union(["pending", "revision_requested", "approved", "rejected", "cancelled"].map(s => Type.Literal(s)))) }),
       execute: args => result(async () => (await client.request<Json[]>("GET", `${client.company}/approvals${args.status ? `?status=${args.status}` : ""}`))
         .filter(a => a && a.requestedByAgentId === self).slice(0, 50)) }),
+    defineTool({ name: "doer_memory_search", replay: "safe", outputLimits: limits,
+      description: "Find work notes saved for this Doer agent. Use local memory_search for portable identity and preferences.",
+      parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 500 }) }),
+      execute: args => result(() => client.request("GET", `/agents/${seg(self)}/memory?q=${encodeURIComponent(args.query)}&limit=10`)) }),
+    defineTool({ name: "doer_memory_save", replay: "unsafe", outputLimits: limits,
+      description: "Save a reusable company work note for this Doer agent. Keep personal information and credentials out. Search before saving to avoid duplicate notes.",
+      parameters: Type.Object({ content: Type.String({ minLength: 1, maxLength: 8000 }), memoryType: Type.Union([Type.Literal("episodic"), Type.Literal("semantic"), Type.Literal("procedural")]) }),
+      execute: args => result(async () => {
+        noSecrets(args.content);
+        return client.request("POST", `/agents/${seg(self)}/memory`, { ...args, heartbeatRunId: client.runId });
+      }) }),
     defineTool({ name: "doer_inbox", replay: "safe", outputLimits: limits, description: "List the issues assigned to you in Doer (compact). Work in_progress first, then todo.",
       parameters: Type.Object({}), execute: () => result(() => client.request("GET", "/agents/me/inbox-lite")) }),
     defineTool({ name: "doer_issue_read", replay: "safe", outputLimits: limits, description: "Read an issue's compact state, ancestors, goal and comment cursor.",
