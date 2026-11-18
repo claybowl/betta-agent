@@ -1,10 +1,20 @@
 # Running under Doer
 
+## Native Betta Agent adapter
+
+Choose **Betta Agent** on the Doer new-agent form and enter the provider/model you want to run. Doer bundles the worker and passes an agent token scoped to the run. Configure remote provider keys as agent environment secret bindings. Ollama can use a local endpoint. The worker protocol probe is `doer-worker --protocol`.
+
+The adapter runs the heartbeat in Doer’s selected workspace and keeps a separate portable Betta home for each company and agent. Open the invocation details to find the home. Use Betta’s normal export command to move it, and configure credentials separately on the destination. The native worker reports usage in its result, and Doer records that usage once.
+
+Use Betta memory tools for identity, preferences, and personal recall. For work notes, `doer_memory_save` records a note under the calling agent and heartbeat, and `doer_memory_search` retrieves that agent’s notes. Issues and approvals stay in Doer. An integration test in the Doer repository runs the packaged worker against real Doer routes and disposable PostgreSQL with a local model fixture.
+
+## Legacy process adapter
+
 From 0.4.0 this runtime can run as a Doer agent with **no changes to Doer**, through Doer's built-in `process` adapter. Doer starts `donjon-agent run HOME PROMPT` on each heartbeat; the runtime talks to Doer's HTTP API for everything else.
 
 The integration is optional. It is active only when all four of `DOER_API_URL`, `DOER_API_KEY`, `DOER_COMPANY_ID` and `DOER_AGENT_ID` are present in the process environment. Without them nothing Doer-related is installed, no network call is made, and the runtime behaves as it did in 0.3.0. These values are read from the environment only; they are never written to `agent.json`, `settings.json`, memory, exports or the action journal.
 
-Status: built and tested against a fake Doer API in this repository's test suite. It has **not** been run against a real Doer instance or on Windows. Treat the setup below as the intended procedure, to be confirmed on a development instance first.
+The following setup and limitations apply to the generic process adapter. The standalone harness suite covers this mode using a fixture API.
 
 ## What the runtime does under Doer
 

@@ -51,7 +51,7 @@ test('disabled shell is absent and cannot execute even when a model attempts it'
 });
 test('skill catalog enters model context and skill_read loads instructions with visible evidence',async t=>{
  const dir=await home(t);await fs.mkdir(path.join(dir,'skills','testing'));await fs.writeFile(path.join(dir,'skills','testing','SKILL.md'),'---\nname: testing\ndescription: Check the widgets\n---\nUse the violet checklist.');
- await fs.symlink(os.tmpdir(),path.join(dir,'skills','escape'));assert.equal((await listSkills(dir)).length,1);
+ await fs.symlink(os.tmpdir(),path.join(dir,'skills','escape'));assert.equal((await listSkills(dir)).filter(s=>s.source!=='bundled').length,1);
  const events=[];
  await runAgent({home:dir,prompt:'Check',requestId:'skill'},e=>events.push(e),fake([ctx=>{assert.match(JSON.stringify(ctx),/Check the widgets/);return call('skill_read',{name:'testing'});},ctx=>{assert.match(JSON.stringify(ctx),/violet checklist/);return fauxAssistantMessage('Checked');}]));
  assert.ok(events.some(e=>e.type==='skill'&&e.name==='testing'));assert.equal(readActions(dir).find(a=>a.name==='skill_read').status,'completed');

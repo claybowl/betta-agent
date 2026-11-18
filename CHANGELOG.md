@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0
+
+- Add the native Doer worker protocol and agent-scoped work memory.
+- Add opt-in network, browser, and desktop connectivity.
+- Bound stalled requests and make terminal tool output easier to read.
+
+## Unreleased
+
+- Add `network`, `browser` and `desktop` permissions. `network` exposes `http_request` (HTTP(S), headers, body, `bearerEnv` credential references, bounded output, no redirect following) without enabling the shell; `browser` and `desktop` expose `agent_browser` / `agent_desktop`, which run the Vercel CLIs with an argument array and no shell.
+- Every run gets a live host capability report, and the agent can refresh it with the `capabilities` tool. `/tools` shows the same report.
+- `/connections` gets an arrow-key menu, a remote URL shortcut and a "Connect my Chrome with browse" preset.
+- Add `/prompt` to view, edit or import an agent's base system instructions.
+- Bundle the `betta-agent` operating brief and the agent-browser / agent-desktop discovery skills; the brief loads on every run.
+- Core memory over 15% of the model's context now warns instead of failing; runs refuse only above 40%.
+- `http_request` action history records only method and URL origin+path.
+
 ## 0.5.0 — 2026-11-16
 
 - Bigger startup banner: BETTA AGENTS in a heavy, wide block face on terminals 76 columns or wider, revealed with a short slanted wipe and glint. Set `DONJON_NO_MOTION=1` to skip the animation; narrower terminals keep the earlier wordmark.

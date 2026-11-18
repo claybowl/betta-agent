@@ -3,6 +3,9 @@ import { compileMemory, migrateMemory, activateMemory, updateMemory, committedFi
 import { recordRecall, recall, hasRecallSources } from "./recall.js";
 import { randomUUID } from "node:crypto";
 import { readSettings } from "./settings.js";
+import { automationTool } from "./automation.js";
+import { operatingBrief } from "./skills.js";
+import { httpTool, capabilityReport } from "./connectivity.js";
 import { Connections } from "./connections.js";
 import { Activity } from "./activity.js";
 import { skillCatalog, readSkill } from "./skills.js";
@@ -34,7 +37,7 @@ const State = defineDoc<{ conversations: Record<string, ConversationId>; pending
 });
 export interface RunInput {
   home: string; cwd?: string; memoryDir?: string; model?: string; baseUrl?: string;
-  prompt?: string; requestId?: string; sessionKey?: string; instructions?: string; resumeOnly?: boolean; allowShell?: boolean;
+  prompt?: string; requestId?: string; sessionKey?: string; instructions?: string; resumeOnly?: boolean; costReporter?: "adapter"; allowShell?: boolean;
 }
 export interface RunResult {
   sessionId: string; requestId: string; summary: string; recovered: boolean;
@@ -60,6 +63,16 @@ export async function makeModels(model: string, baseUrl?: string): Promise<Model
   return models;
 }
 
+/** One readable line for a run that did not answer; raw detail stays in the runtime log. */
+export function runFailureMessage(result: unknown, model: string) {
+  const r = (result || {}) as { reason?: string; detail?: string; status?: string };
+  const detail = String(r.detail || '');
+  if (r.reason === "model_error" && /timed out|terminated|ETIMEDOUT|ECONNRESET/i.test(detail))
+    return `${model} did not respond (${detail.replace(/\.$/, "")}). The provider may be down or overloaded; nothing was lost. Try again, or switch with /model.`;
+  if (r.reason === "model_error") return `${model} returned an error: ${detail || "no detail"}. Try again, or switch with /model.`;
+  if (r.reason === "turn_limit") return "Stopped at the turn limit. Raise it in /runtime or ask the agent to continue.";
+  return `Run did not complete (${r.reason || r.status || "unknown"}${detail ? ": " + detail : ""}).`;
+}
 export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedModels?: Models, signal?: AbortSignal, suppliedConnections?: Connections): Promise<RunResult> {
   // Doer integration is on only when all four DOER_* variables are in the environment. Read before taking the lock.
   const doer = doerConfig();
@@ -95,8 +108,17 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     if (split < 1) throw new Error("Model must be provider/model-id");
     const models = suppliedModels || await makeModels(selected, input.baseUrl);
     const model = models.getModel(selected.slice(0, split), selected.slice(split + 1));
-    const memoryBudget = Math.max(100, Math.floor((model?.contextWindow || 32768) * 0.15) * 3);
-    const active = await activateMemory(home, memoryBudget);
+    // Fifteen percent is a preferred allocation, not a reason to lose an agent
+    // when switching models. Allow larger core memory within a bounded share.
+    const contextWindow = model?.contextWindow || 32768;
+    const active = await activateMemory(home);
+    const memoryTokenLimit = Math.floor(contextWindow * 0.4);
+    if (active.estimatedTokens > memoryTokenLimit) {
+      throw new Error(`Core memory exceeds the model budget: needs approximately ${active.estimatedTokens} tokens; ${selected} has a ${contextWindow}-token context and allows ${memoryTokenLimit} for core memory. Choose a larger-context model or shorten persona.md and continuity.md, preserving details in deferred files. Memory has not been changed.`);
+    }
+    if (active.estimatedTokens > Math.floor(contextWindow * 0.15)) {
+      active.warning = [active.warning, `Core memory uses approximately ${Math.round(active.estimatedTokens / contextWindow * 100)}% of model context (${active.estimatedTokens} tokens); continuing with less room for conversation and tools.`].filter(Boolean).join(' · ');
+    }
     emit({ type: "memory_active", revision: active.revision, characters: active.characters, estimatedTokens: active.estimatedTokens, warning: active.warning });
     const registry = createRegistry();
     const activity = new Activity(home, emit);
@@ -146,7 +168,14 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     const codemode = createCodemodeExtension({ sandbox: new CodemodeSandbox({ memoryLimitBytes: 64 * 1024 * 1024 }) });
     const codeTools = permissions.shell && permissions.files ? (codemode.tools || []).map(t => activity.wrap(t)) : [];
     registry.install({ ...codemode, tools: codeTools });
-    const allowedTools = [...coding, ...(memoryExtension.tools || []).map(t => activity.wrap(t)), activity.wrap(skillTool), ...mcpTools, ...codeTools];
+    const networkTools = permissions.network ? [activity.wrap(httpTool)] : [];
+    if (permissions.browser) networkTools.push(activity.wrap(automationTool("agent-browser",cwd)));
+    if (permissions.desktop) networkTools.push(activity.wrap(automationTool("agent-desktop",cwd)));
+    registry.install(defineExtension({ name: "http-connectivity", tools: networkTools }));
+    const capabilities = () => capabilityReport({ ...settings, permissions }, connections, cwd);
+    const statusTool = activity.wrap(defineTool({ name: "capabilities", description: "Inspect live host permissions, connected MCP servers and tools before answering connectivity questions.", parameters: Type.Object({}), replay: "safe", execute: async () => textResult(capabilities()) }));
+    registry.install(defineExtension({ name: "host-capabilities", sections: [section("host-capabilities", () => JSON.stringify(capabilities())), section("betta-agent", () => operatingBrief())], tools: [statusTool] }));
+    const allowedTools = [statusTool, ...networkTools, ...coding, ...(memoryExtension.tools || []).map(t => activity.wrap(t)), activity.wrap(skillTool), ...mcpTools, ...codeTools];
     if (doerClient && doerStart) {
       const extension = doerExtension(doerClient, await doerBriefing(doerClient, doerStart, emit));
       const doerTools = (extension.tools || []).map(t => activity.wrap(t));
@@ -168,7 +197,9 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     }
     harness = await Harness.open(await openNodeSqliteStorage(path.join(home, "state", "runtime.sqlite")), {
       models, registry, env: (target) => new LiveEnvironment({ cwd: target.cwd || cwd }),
-      settings: { toolExecution: "sequential", compaction: { enabled: settings.compaction }, retry: { maxRetries: 2 } },
+      // A provider that accepts the connection and never answers would otherwise hold a turn for the SDK's
+      // 10-minute default times every retry. Fail within a few minutes and say which model to switch.
+      settings: { toolExecution: "sequential", compaction: { enabled: settings.compaction }, retry: { maxRetries: 1 }, stream: { timeoutMs: 120_000, maxRetries: 0 } },
     }, context);
     const runtime = harness;
     const before = await runtime.usage(context);
@@ -188,7 +219,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       const result = await submission.wait(context);
       if (result.status !== "done" || result.type !== "input") {
         await runtime.commit(async tx => { (await tx.doc(State)).pending = null; }, context);
-        throw new Error(`Run did not complete: ${JSON.stringify(result)}`);
+        throw new Error(runFailureMessage(result, selected));
       }
       const entry = await runtime.commit(tx => tx.entry(AssistantEntry, result.answer), context);
       return (entry?.model || []).flatMap(message => message.role === "assistant" ? message.content.filter(c => c.type === "text").map(c => c.text) : []).join("\n");
@@ -305,7 +336,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     for (const [key, value] of doerEnvBefore) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     // Doer's process adapter reports no usage, so report it here. Best effort, bounded, and never fails the run;
     // it uses its own client so a cancelled run still reports what it spent.
-    if (doer && doerStart && doerUsage) { const reporter = new DoerClient(doer); reporter.runId = doerStart.runId; await reportCost(reporter, doerStart, doerUsage, emit).catch(() => false); }
+    if (input.costReporter !== "adapter" && doer && doerStart && doerUsage) { const reporter = new DoerClient(doer); reporter.runId = doerStart.runId; await reportCost(reporter, doerStart, doerUsage, emit).catch(() => false); }
     try { await abortWork; await harness?.close(context); }
     finally { try { if (!suppliedConnections) await connections.close(); } finally { release(); } }
   }

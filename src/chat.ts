@@ -12,8 +12,9 @@ import { runAgent, type Emit } from './harness.js';
 import { readApp, saveApp, readSettings, saveSettings, listAgents, atomicJson, configRoot, type AgentSettings, type Connection } from './settings.js';
 import { inspectSkills, readSkill } from './skills.js';
 import { readActions } from './activity.js';
+import { capabilityReport } from './connectivity.js';
 import { Connections } from './connections.js';
-import { clean, makeTheme, themeNames, themeLabels, rule, banner as wordmark, playBanner, readLine, pick, spinner, type Command, type PickItem, type ThemeName } from './tui.js';
+import { clean, toolPreview, makeTheme, themeNames, themeLabels, rule, banner as wordmark, playBanner, readLine, pick, spinner, type Command, type PickItem, type ThemeName } from './tui.js';
 import { appModels, deviceId, subscriptionBlocked, FileCredentialStore } from './credentials.js';
 import { parseGoal, goalStatus, goalPrompt } from './goal.js';
 import { spawn } from 'node:child_process';
@@ -37,7 +38,9 @@ const commandList: Command[] = [
   { name: '/settings', description: 'Browse settings' },
   { name: '/permissions', description: 'Shell, file writes, MCP' },
   { name: '/runtime', description: 'Model, turn limit, compaction, timeout' },
-  { name: '/connections', description: 'Add and manage MCP servers' },
+  { name: '/connections', description: 'Connect browsers and MCP servers' },
+  { name: '/prompt', description: 'View or edit this agent’s system instructions' },
+  { name: '/tools', description: 'Live tools, permissions and connection status' },
   { name: '/cwd', description: 'Choose working directory · /cwd [PATH]' },
   { name: '/theme', description: 'Magic City, purple or plain' },
   { name: '/app', description: 'Theme and startup banner' },
@@ -134,24 +137,44 @@ export async function chat(initialHome: string) {
     if (!picked) return undefined;
     return picked.value || (await ask('Provider/model > ')) || undefined;
   };
+  const systemPrompt = async (action?: string) => {
+    panel('System prompt · ' + manifest.name);
+    manifest = await readManifest(home); line(manifest.instructions);
+    line('These are your agent’s base instructions in agent.json. Betta also supplies the operating brief, live capabilities, skills, committed memory and any run-specific instructions. Changes apply on the next turn.');
+    if (!action && tty) action = (await pick<string>({title:'System prompt',theme,items:[{label:'Keep current instructions',value:'view'},{label:'Paste new instructions',value:'edit'},{label:'Load instructions from a file',value:'file'}]}))?.value;
+    else if (!action) action = await ask('view | edit | file (Enter returns) > ');
+    if (!action || action === 'view') return;
+    let instructions: string;
+    if (action === 'file') { const file=await ask('Instructions file path > '); if(!file)return; instructions=await fs.readFile(expand(file),'utf8'); }
+    else if (action === 'edit') {
+      line('Paste instructions line by line. .save saves; .cancel keeps the current prompt.');
+      const lines:string[]=[];
+      for(;;) { const text=await ask('> '); if(leaving || text === '.cancel')return; if(text === '.save')break; lines.push(text); }
+      instructions=lines.join('\n');
+    } else throw new Error('/prompt view | edit | file');
+    if(!instructions.trim() || Buffer.byteLength(instructions)>64000)throw new Error('Instructions must contain text and fit within 64 KB');
+    const release=await lockHome(home);
+    try { const current=await readManifest(home); manifest={...current,instructions}; await atomicJson(path.join(home,'agent.json'),manifest); } finally { release(); }
+    line('System instructions saved.');
+  };
   const permissions = async () => {
     panel('Permissions · ' + manifest.name);
-    line('Shell runs local commands. Files permits write/edit. MCP permits enabled server connections and tools.\nMemory tools remain enabled. These are tool access switches, not an operating-system sandbox; shell tools can also modify files.');
+    line('Shell runs local commands. Files permits write/edit. MCP permits enabled server connections and tools. Network permits HTTP requests.\nMemory tools remain enabled. These are tool access switches, not an operating-system sandbox; shell tools can also modify files.');
     if (tty) {
-      const about = { shell: 'run local commands', files: 'write and edit files', mcp: 'connect to enabled MCP servers' };
+      const about = { shell: 'run local commands', files: 'write and edit files', mcp: 'connect to enabled MCP servers', network: 'make HTTP requests, including local services', browser:'use Vercel agent-browser', desktop:'use Vercel agent-desktop' };
       for (let at: keyof AgentSettings['permissions'] = 'shell';;) {
         const picked: PickItem<keyof AgentSettings['permissions']> | undefined = await pick<keyof AgentSettings['permissions']>({ title: 'Permissions', theme, filter: false, receipt: false, select: at, hint: '↑↓ move · Enter toggles · Esc done',
-          items: (['shell', 'files', 'mcp'] as const).map(k => ({ label: k, value: k, badge: settings.permissions[k] ? '● on' : '○ off', tone: settings.permissions[k] ? 'ok' as const : 'dim' as const, detail: about[k] })) });
+          items: (['shell', 'files', 'mcp', 'network', 'browser', 'desktop'] as const).map(k => ({ label: k, value: k, badge: settings.permissions[k] ? '● on' : '○ off', tone: settings.permissions[k] ? 'ok' as const : 'dim' as const, detail: about[k] })) });
         if (!picked) break;
         at = picked.value; settings.permissions[at] = !settings.permissions[at]; await save();
       }
       line(Object.entries(settings.permissions).map(([k, v]) => `${k} ${v ? 'on' : 'off'}`).join('  ·  ')); return;
     }
     for (const [k,v] of Object.entries(settings.permissions)) line(`${k.padEnd(8)} ${v ? 'on' : 'off'}`);
-    const answer = await ask('Change: shell|files|mcp on|off (Enter returns) > ');
+    const answer = await ask('Change: shell|files|mcp|network|browser|desktop on|off (Enter returns) > ');
     if (!answer) return;
     const [key, value] = answer.split(/\s+/);
-    if (!['shell','files','mcp'].includes(key) || !['on','off'].includes(value)) throw new Error('Example: shell on');
+    if (!['shell','files','mcp','network','browser','desktop'].includes(key) || !['on','off'].includes(value)) throw new Error('Example: shell on');
     settings.permissions[key as keyof AgentSettings['permissions']] = value === 'on'; await save(); line('Permission saved.');
   };
   const runtime = async () => {
@@ -223,10 +246,31 @@ export async function chat(initialHome: string) {
       if (connections.errors.has(c.name)) line('  ' + connections.errors.get(c.name));
     }
     if (!settings.connections.length) line('No servers configured.');
-    const answer = await ask('add | connect | enable NAME | disable NAME | remove NAME | tools (Enter returns) > ');
+    const menu = tty ? await pick<string>({ title: 'Connections', theme, items: [
+      {label:'Connect enabled servers',value:'connect'},
+      {label:'Connect my Chrome with browse',value:'browser',detail:'requires the browse extension and pairing'},
+      {label:'Add a remote MCP URL',value:'remote'},
+      {label:'Add a local MCP server',value:'add'},
+      {label:'Inspect connected tools',value:'tools'},
+      ...settings.connections.flatMap(c => [
+        {label:(c.enabled?'Disable ':'Enable ')+c.name,value:(c.enabled?'disable ':'enable ')+c.name,badge:connections.status(c.name)},
+        {label:'Remove '+c.name,value:'remove '+c.name}])
+    ] }) : undefined;
+    const answer = tty ? menu?.value || '' : await ask('browser | remote | add | connect | enable NAME | disable NAME | remove NAME | tools (Enter returns) > ');
     const [action,name] = answer.split(/\s+/);
     if (!answer) return;
-    if (action === 'add') {
+    if (action === 'browser' || action === 'remote') {
+      const c: Connection = action === 'browser'
+        ? { name:'browse',transport:'stdio',command:path.join(os.homedir(),'.local','bin','browse'),args:['mcp'],enabled:true }
+        : { name:await ask('Server name > '),transport:'http',url:await ask('MCP server URL > '),bearerEnv:(await ask('Bearer-token environment variable (Enter = none) > ')) || undefined,enabled:true };
+      if (settings.connections.some(v => v.name === c.name)) throw new Error('That server already exists; enable it and connect.');
+      if(action === 'browser') await fs.access(c.command!);
+      const next = { ...settings, permissions:{...settings.permissions,mcp:true}, connections:[...settings.connections,c] };
+      await saveSettings(home,next); settings=next; await connections.close();
+      await connections.sync(settings, settings.cwd || home, render);
+      line(`${c.name}: ${connections.status(c.name)}`);
+      if(action === 'browser') line('If Chrome is not paired yet, run ~/.local/bin/browse install --agent none, then pair the browse extension.');
+    } else if (action === 'add') {
       const name = await ask('Server name > '); if (!name) return;
       const transport = await ask('Transport: stdio or http > ');
       const c: Connection = { name, transport: transport as Connection['transport'], enabled: false };
@@ -306,7 +350,7 @@ export async function chat(initialHome: string) {
     notes();
     line('/skill NAME reads instructions. /use NAME TASK requests a skill explicitly. Loaded skills appear in live activity and /actions.');
   };
-  const render: Emit = event => {
+    const render: Emit = event => {
     if (event.type === 'command_start') { panel('Command'); line(Array.isArray(event.command) ? event.command.join(' ') : String(event.command)); console.log(dim(event.cwd)); }
     else if (event.type === 'command_output') process.stdout.write(cleanText(event.text));
     else if (event.type === 'command_end') console.log('\n' + dim(event.error ? `Stopped / uncertain: ${event.error}` : `Exit code: ${event.exitCode}`));
@@ -315,7 +359,7 @@ export async function chat(initialHome: string) {
     else if (event.type === 'tool_result' && event.name !== 'bash') {
       const output = event.output as { type: string; text?: string }[] | undefined;
       const text = output?.filter(c => c.type === 'text').map(c => c.text).join('\n');
-      if (text) line(text.length > 3000 ? text.slice(0,3000) + '\n… display truncated' : text);
+      if (text) console.log(dim(toolPreview(text)));
     }
     else if (event.type === 'memory_active') console.log(dim(`Memory active: ${event.revision}${event.warning ? ' · '+event.warning : ''}`));
     else if (event.type === 'skill') console.log(theme.second(`◆ Using skill: ${event.name}`));
@@ -478,11 +522,13 @@ export async function chat(initialHome: string) {
             if(json) { const release=await lockHome(home);const prior=await reflectionSettings(home);try { await saveState(home,'reflection-settings.json',JSON.parse(json));try{await reflectionSettings(home);}catch(e){await saveState(home,'reflection-settings.json',prior);throw e;} }finally{release();}line('Reflection settings saved.'); }
           } else throw new Error('/reflect preview | list | apply ID | discard ID | retry ID | settings');
         }
+        else if (cmd === '/prompt') await systemPrompt(arg || undefined);
         else if (cmd === '/permissions') await permissions();
         else if (cmd === '/runtime') await runtime();
         else if (cmd === '/app') await appearance();
         else if (cmd === '/cwd') await changeCwd(arg);
         else if (cmd === '/connections') await connectionMenu();
+        else if (cmd === '/tools') { await connections.sync(settings, settings.cwd || home, render); line(JSON.stringify(capabilityReport(settings,connections,settings.cwd || home),null,2)); }
         else if (cmd === '/agents' || cmd === '/agent') await switchAgent(arg);
         else if (cmd === '/new') await newAgent();
         else if (cmd === '/skills') await skillsMenu();
@@ -492,11 +538,11 @@ export async function chat(initialHome: string) {
         else if (cmd === '/resume') await run('',true);
         else if (cmd === '/clear') { if (process.stdout.isTTY) console.clear(); status(); }
         else if (cmd === '/settings') {
-          const sections = ['Permissions', 'Runtime', 'Working directory', 'Connections', 'Application', 'Agents', 'Skills', 'Action history', 'Memory', 'Reflection budgets'];
+          const sections = ['Permissions', 'Runtime', 'Working directory', 'Connections', 'Application', 'Agents', 'Skills', 'Action history', 'Memory', 'Reflection budgets', 'System prompt'];
           let choice: string;
           if (tty) { const picked = await pick<string>({ title: 'Settings', theme, receipt: false, items: sections.map((label, n) => ({ label, value: String(n + 1) })) }); if (!picked) continue; choice = picked.value; }
           else { panel('Settings'); line(sections.map((label, n) => `${String(n + 1).padEnd(2)} ${label}`).join('\n')); choice = await ask('Section (Enter returns) > '); }
-          if (choice === '1') await permissions(); else if (choice === '2') await runtime(); else if (choice === '3') await changeCwd(); else if (choice === '4') await connectionMenu(); else if (choice === '5') await appearance(); else if (choice === '6') await switchAgent(); else if (choice === '7') await skillsMenu(); else if (choice === '8') showActions(); else if (choice === '9') { line(JSON.stringify(await memoryCommand(home,'status'),null,2)); line('Use /memory to browse and configure memory.'); } else if (choice === '10') { line(JSON.stringify(await reflectionSettings(home),null,2)); line('Use /reflect settings to adjust budgets.'); }
+          if (choice === '11') await systemPrompt(); else if (choice === '1') await permissions(); else if (choice === '2') await runtime(); else if (choice === '3') await changeCwd(); else if (choice === '4') await connectionMenu(); else if (choice === '5') await appearance(); else if (choice === '6') await switchAgent(); else if (choice === '7') await skillsMenu(); else if (choice === '8') showActions(); else if (choice === '9') { line(JSON.stringify(await memoryCommand(home,'status'),null,2)); line('Use /memory to browse and configure memory.'); } else if (choice === '10') { line(JSON.stringify(await reflectionSettings(home),null,2)); line('Use /reflect settings to adjust budgets.'); }
         } else throw new Error('Unknown slash command. Use /help.');
       } catch (error) { console.log(theme.err(error instanceof Error ? explainRunError(error.message) : error)); }
     }

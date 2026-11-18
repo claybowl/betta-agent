@@ -18,7 +18,7 @@ export class Activity {
       const id = randomUUID();
       // Persist intent before invoking anything that can have an external effect.
       // Arguments are written with known credentials removed: a model can paste a secret into any tool call.
-      this.record({ id, name: tool.name, status: 'started', detail: redact(JSON.stringify(args)).slice(0, 2000) });
+      this.record({ id, name: tool.name, status: 'started', detail: tool.name === 'http_request' ? JSON.stringify({ method: args.method || 'GET', url: (() => { try { const u = new URL(args.url); return u.origin + u.pathname; } catch { return '[invalid URL]'; } })() }) : redact(JSON.stringify(args)).slice(0, 2000) });
       try {
         const result = await tool.execute(args, api, context);
         this.record({ id, name: tool.name, status: result.isError ? 'error' : 'completed', detail: result.isError ? 'Tool returned an error; partial effects may remain.' : 'Tool returned a result. External effects may need verification.' });

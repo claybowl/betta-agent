@@ -321,3 +321,16 @@ export function spinner(theme: Theme, text: () => string) {
     stop() { if (timer) clearInterval(timer); timer = undefined; hide(); },
   };
 }
+
+/** Tool output as a short readable preview: JSON is unwrapped and pretty-printed, strings show their real line breaks. The model still receives the full output. */
+export function toolPreview(text: string, maxLines = 12) {
+  let shown = text;
+  try {
+    const value = JSON.parse(text);
+    const inner = value?.data?.content ?? value?.content;
+    shown = typeof inner === 'string' ? inner : JSON.stringify(value, null, 2);
+  } catch { /* plain text */ }
+  const lines = clean(shown).split('\n').map(l => l.length > 160 ? l.slice(0, 159) + '…' : l);
+  const more = lines.length - maxLines;
+  return '  ' + lines.slice(0, maxLines).join('\n  ') + (more > 0 ? `\n  … ${more} more lines shown to the agent, not here` : '');
+}
