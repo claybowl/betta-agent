@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+
+- Add the native Doer worker protocol and agent-scoped work memory.
+- Add opt-in network, browser, and desktop connectivity.
+- Bound stalled requests and make terminal tool output easier to read.
+
 ## Unreleased
 
 - Add `network`, `browser` and `desktop` permissions. `network` exposes `http_request` (HTTP(S), headers, body, `bearerEnv` credential references, bounded output, no redirect following) without enabling the shell; `browser` and `desktop` expose `agent_browser` / `agent_desktop`, which run the Vercel CLIs with an argument array and no shell.

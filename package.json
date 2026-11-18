@@ -1,6 +1,6 @@
 {
   "name": "donjon-agent",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "DIS Betta Agent Harness: portable stateful agents with durable memory",
   "type": "module",
   "license": "MIT",
