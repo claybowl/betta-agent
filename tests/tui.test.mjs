@@ -21,7 +21,7 @@ test('skill frontmatter: folded descriptions, lowercase file names, and skipped 
  const {skills,skipped}=await inspectSkills(dir),by=Object.fromEntries(skills.map(s=>[s.name,s]));
  assert.equal(by.folded.description,'Check the widgets twice over.');assert.equal(by.folded.title,'Folded Skill');
  assert.equal(by.lower.description,'First body line.');assert.equal(by.quoted.description,'Quoted: with colon');
- assert.deepEqual(skills.map(s=>s.name),['folded','lower','quoted']);
+ assert.deepEqual(skills.filter(s=>s.source!=='bundled').map(s=>s.name),['folded','lower','quoted']);
  assert.match(skipped.find(s=>s.path==='linked').reason,/symbolic link/);assert.match(skipped.find(s=>s.path==='empty').reason,/no SKILL.md/);
  assert.deepEqual(frontmatter('no frontmatter\ndescription: x'),{});
 });

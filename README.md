@@ -88,6 +88,7 @@ Type `/` and the palette appears under the prompt. Keep typing to filter, Tab to
 | `/memory` | Inspect, search and sync memory |
 | `/reflect` | Have the agent propose what it should remember |
 | `/permissions` | Shell, file writes, MCP tools |
+| `/tools` | Show live permissions, server status, and discovered MCP tools |
 | `/connections` | Add and manage MCP servers |
 | `/cwd [PATH]` | Set the folder the agent works in |
 | `/runtime` | Turn limit, compaction, timeout |
@@ -185,6 +186,20 @@ App-wide settings live in `~/.donjon/` (`settings.json`, `credentials.json`). Se
 ### Running under Doer
 
 Betta agents can run as workers in [Doer](https://doer.company), an agent orchestration platform. Set `DOER_API_URL`, `DOER_API_KEY`, `DOER_COMPANY_ID` and `DOER_AGENT_ID`, and `run` picks up Doer's tasks, approvals and issues, and reports its own cost. Without those variables nothing changes. See [DOER.md](DOER.md).
+
+### HTTP and Chrome connectivity
+
+Enable `network` in `/permissions` to expose `http_request` independently of shell access. Requests support HTTP(S), methods, headers, optional body, credential environment references, bounded response text, cancellation and timeouts. Redirects are returned without following. This permission allows local network services too; it is not a network sandbox. Request bodies, headers and query strings are omitted from the action-history argument summary; responses still enter the conversation.
+
+`/connections` now offers an arrow-key menu, a remote URL shortcut and a browse Chrome preset. Install browse from its official installer and pair the extension in your chosen Chrome profile, then select **Connect my Chrome with browse**. The preset enables MCP and saves the stdio connection. Other services still require their own server and authentication; OAuth login is not implemented. `/tools` shows live connection status, and every model turn receives a host capability report. The agent can refresh it using `capabilities`.
+
+### System instructions and built-in skills
+
+`/prompt` (also Settings → System prompt) displays or replaces this agent’s base system instructions in `agent.json`. Use `edit` to paste multiple lines, ending with `.save` or `.cancel`, or `file` to import a UTF-8 file. Memory, the bundled operating brief, live capabilities and run instructions supplement that base. Changes apply next turn.
+
+The bundled `betta-agent` brief loads on every run, including Doer worker runs. It routes substantive tasks to relevant skills without requiring skill loads for trivial conversation. The Vercel browser and desktop discovery skills are bundled; guides come from the installed CLI versions. Enable `browser` or `desktop` in `/permissions` to expose the dedicated `agent_browser` or `agent_desktop` argument-array tool without enabling a general shell. Install the CLIs on each worker; browser logins and macOS permission grants remain specific to that machine. User-local ~/.local/bin installations take priority over PATH.
+
+Core memory budgeting uses an approximate UTF-8 byte-based token estimate. The preferred allocation is 15% of the selected model context; larger memory continues with a warning up to 40%. Above that, Betta explains the sizes and recovery options before starting inference. This allocation is a heuristic, not a guarantee that the entire prompt fits. Personal memory files are never automatically truncated.
 
 ## Development
 

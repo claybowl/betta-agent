@@ -10,7 +10,7 @@ export interface Connection {
 }
 export interface AgentSettings {
   version: 1; cwd?: string; maxTurns: number; compaction: boolean; timeoutSeconds: number;
-  permissions: { shell: boolean; files: boolean; mcp: boolean };
+  permissions: { shell: boolean; files: boolean; mcp: boolean; network?: boolean; browser?: boolean; desktop?: boolean };
   connections: Connection[];
 }
 export interface AppSettings { version: 1; theme: 'magic' | 'purple' | 'plain'; banner: boolean; agentHomes: string[]; look?: 2 }
@@ -32,6 +32,7 @@ export function validateSettings(s: AgentSettings): AgentSettings {
       !Number.isInteger(s.timeoutSeconds) || s.timeoutSeconds < 0 || s.timeoutSeconds > 86400 ||
       typeof s.compaction !== 'boolean' || (s.cwd !== undefined && (typeof s.cwd !== 'string' || !path.isAbsolute(s.cwd))) ||
       !s.permissions || ['shell','files','mcp'].some(k => typeof s.permissions[k as keyof AgentSettings['permissions']] !== 'boolean') ||
+      (['network','browser','desktop'] as const).some(k => s.permissions[k] !== undefined && typeof s.permissions[k] !== 'boolean') ||
       !Array.isArray(s.connections)) throw new Error('Invalid agent settings');
   const names = new Set<string>();
   for (const c of s.connections) {
@@ -52,7 +53,7 @@ export async function readSettings(home: string): Promise<AgentSettings> {
   const manifest = await readManifest(home);
   return validateSettings(await json(path.join(home, 'settings.json')) ?? {
     version: 1, maxTurns: 50, compaction: true, timeoutSeconds: 0,
-    permissions: { shell: manifest.allowShell, files: manifest.allowShell, mcp: false }, connections: [],
+    permissions: { shell: manifest.allowShell, files: manifest.allowShell, mcp: false, network: false }, connections: [],
   });
 }
 export async function saveSettings(home: string, settings: AgentSettings) {

@@ -1,7 +1,10 @@
 import { committedFiles, head } from './memfs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-export interface Skill { name: string; description: string; file: string; /** Display name from frontmatter, when it differs from the catalog name. */ title?: string; source: 'memory' | 'home' }
+import { fileURLToPath } from 'node:url';
+const bundledRoot = fileURLToPath(new URL('../skills/', import.meta.url));
+export async function operatingBrief() { return fs.readFile(path.join(bundledRoot,'betta-agent','SKILL.md'),'utf8'); }
+export interface Skill { name: string; description: string; file: string; /** Display name from frontmatter, when it differs from the catalog name. */ title?: string; source: 'memory' | 'home' | 'bundled' }
 export interface SkippedSkill { path: string; reason: string }
 const isSkillFile = (name: string) => /^skill\.md$/i.test(name);
 /** Top-level keys of a leading YAML frontmatter block, with folded (>), literal (|) and indented multi-line values joined to one line. */
@@ -60,7 +63,9 @@ export async function inspectSkills(home: string): Promise<{ skills: Skill[]; sk
   try { const files=await committedFiles(root);memory=[...files].filter(([p])=>p.startsWith('skills/')&&/\/skill\.md$/i.test(p)).map(([p,content])=>({name:p.slice(7,-9),...describe(content,'Agent memory skill'),file:path.join(root,p),source:'memory' as const})); }
   catch(e) { if((e as NodeJS.ErrnoException).code!=='ENOENT') throw e; }
   const legacy = await listSkillRoot(path.join(home, 'skills'), skipped);
-  return { skills: [...memory, ...legacy.filter(s => !memory.some(m => m.name === s.name))], skipped };
+  const custom = [...memory, ...legacy.filter(s => !memory.some(m => m.name === s.name))];
+  const bundled = (await listSkillRoot(bundledRoot, [])).map(s => ({...s,source:'bundled' as const}));
+  return { skills: [...custom, ...bundled.filter(s => !custom.some(c => c.name === s.name))], skipped };
 }
 export async function listSkills(home: string): Promise<Skill[]> { return (await inspectSkills(home)).skills; }
 export async function readSkill(home: string, name: string) {

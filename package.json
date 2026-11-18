@@ -31,7 +31,8 @@
     "CHANGELOG.md",
     "LICENSE",
     "MEMORY.md",
-    "DOER.md"
+    "DOER.md",
+    "skills"
   ],
   "engines": {
     "node": ">=22.19.0"

@@ -3,6 +3,9 @@ import { compileMemory, migrateMemory, activateMemory, updateMemory, committedFi
 import { recordRecall, recall, hasRecallSources } from "./recall.js";
 import { randomUUID } from "node:crypto";
 import { readSettings } from "./settings.js";
+import { automationTool } from "./automation.js";
+import { operatingBrief } from "./skills.js";
+import { httpTool, capabilityReport } from "./connectivity.js";
 import { Connections } from "./connections.js";
 import { Activity } from "./activity.js";
 import { skillCatalog, readSkill } from "./skills.js";
@@ -95,8 +98,17 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     if (split < 1) throw new Error("Model must be provider/model-id");
     const models = suppliedModels || await makeModels(selected, input.baseUrl);
     const model = models.getModel(selected.slice(0, split), selected.slice(split + 1));
-    const memoryBudget = Math.max(100, Math.floor((model?.contextWindow || 32768) * 0.15) * 3);
-    const active = await activateMemory(home, memoryBudget);
+    // Fifteen percent is a preferred allocation, not a reason to lose an agent
+    // when switching models. Allow larger core memory within a bounded share.
+    const contextWindow = model?.contextWindow || 32768;
+    const active = await activateMemory(home);
+    const memoryTokenLimit = Math.floor(contextWindow * 0.4);
+    if (active.estimatedTokens > memoryTokenLimit) {
+      throw new Error(`Core memory exceeds the model budget: needs approximately ${active.estimatedTokens} tokens; ${selected} has a ${contextWindow}-token context and allows ${memoryTokenLimit} for core memory. Choose a larger-context model or shorten persona.md and continuity.md, preserving details in deferred files. Memory has not been changed.`);
+    }
+    if (active.estimatedTokens > Math.floor(contextWindow * 0.15)) {
+      active.warning = [active.warning, `Core memory uses approximately ${Math.round(active.estimatedTokens / contextWindow * 100)}% of model context (${active.estimatedTokens} tokens); continuing with less room for conversation and tools.`].filter(Boolean).join(' · ');
+    }
     emit({ type: "memory_active", revision: active.revision, characters: active.characters, estimatedTokens: active.estimatedTokens, warning: active.warning });
     const registry = createRegistry();
     const activity = new Activity(home, emit);
@@ -146,7 +158,14 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     const codemode = createCodemodeExtension({ sandbox: new CodemodeSandbox({ memoryLimitBytes: 64 * 1024 * 1024 }) });
     const codeTools = permissions.shell && permissions.files ? (codemode.tools || []).map(t => activity.wrap(t)) : [];
     registry.install({ ...codemode, tools: codeTools });
-    const allowedTools = [...coding, ...(memoryExtension.tools || []).map(t => activity.wrap(t)), activity.wrap(skillTool), ...mcpTools, ...codeTools];
+    const networkTools = permissions.network ? [activity.wrap(httpTool)] : [];
+    if (permissions.browser) networkTools.push(activity.wrap(automationTool("agent-browser",cwd)));
+    if (permissions.desktop) networkTools.push(activity.wrap(automationTool("agent-desktop",cwd)));
+    registry.install(defineExtension({ name: "http-connectivity", tools: networkTools }));
+    const capabilities = () => capabilityReport({ ...settings, permissions }, connections, cwd);
+    const statusTool = activity.wrap(defineTool({ name: "capabilities", description: "Inspect live host permissions, connected MCP servers and tools before answering connectivity questions.", parameters: Type.Object({}), replay: "safe", execute: async () => textResult(capabilities()) }));
+    registry.install(defineExtension({ name: "host-capabilities", sections: [section("host-capabilities", () => JSON.stringify(capabilities())), section("betta-agent", () => operatingBrief())], tools: [statusTool] }));
+    const allowedTools = [statusTool, ...networkTools, ...coding, ...(memoryExtension.tools || []).map(t => activity.wrap(t)), activity.wrap(skillTool), ...mcpTools, ...codeTools];
     if (doerClient && doerStart) {
       const extension = doerExtension(doerClient, await doerBriefing(doerClient, doerStart, emit));
       const doerTools = (extension.tools || []).map(t => activity.wrap(t));
