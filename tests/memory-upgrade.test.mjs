@@ -51,6 +51,16 @@ test('recall is agent-scoped, idempotent, searchable and redacts known credentia
  const a=await home(t),b=await home(t);process.env.DONJON_TEST_API_KEY='super-secret-sample-value';try{recordRecall(a,'one','main','user','Use '+process.env.DONJON_TEST_API_KEY+' for the boat');recordRecall(a,'one','main','user','duplicate');}finally{delete process.env.DONJON_TEST_API_KEY;}
  assert.equal(recall(a).length,1);assert.match(recall(a,'boat')[0].text,/REDACTED/);assert.equal(recall(b).length,0);
 });
+test('recall searches past 2000 newer messages and limits literal case-insensitive matches',async t=>{
+ const dir=await home(t);
+ recordRecall(dir,'older','main','user','A 50% discount.');
+ recordRecall(dir,'newer','main','assistant','The DISCOUNT is 75%.');
+ recordRecall(dir,'without-percent','main','user','The discount is 75 dollars.');
+ recordRecall(dir,'without-discount','main','user','I am 100% certain.');
+ for(let i=0;i<2000;i++)recordRecall(dir,`filler-${i}`,'main','user','Unrelated conversation.');
+ assert.deepEqual(recall(dir,'DiScOuNt  %').map(entry=>entry.id),['older:user','newer:assistant']);
+ assert.deepEqual(recall(dir,'DiScOuNt %',1).map(entry=>entry.id),['newer:assistant']);
+});
 test('reflection proposes evidence-backed changes and only consumes evidence after application',async t=>{
  const dir=await home(t);await migrateMemory(dir);recordRecall(dir,'source','main','user','My boat is blue.');
  const models=fake([fauxAssistantMessage(JSON.stringify({summary:'Remember the boat color',changes:[{path:'boat.md',content:'The boat is blue.',sourceIds:['source:user']}]}))]);

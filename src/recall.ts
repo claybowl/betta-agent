@@ -13,7 +13,22 @@ export function recordRecall(home:string,requestId:string,sessionId:string,role:
 export function recall(home:string,query='',limit=40):RecallEntry[] {
   const file=path.join(home,'state','recall.sqlite');if(!fs.existsSync(file))return [];
   const db=new DatabaseSync(file,{readOnly:true});
-  try{const terms=query.toLowerCase().split(/\s+/).filter(Boolean);return (db.prepare('SELECT * FROM messages ORDER BY rowid DESC LIMIT 2000').all() as unknown as RecallEntry[]).filter(r=>terms.every(t=>r.text.toLowerCase().includes(t))).slice(0,Math.max(1,Math.min(200,limit))).reverse();}finally{db.close();}
+  try {
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const maxResults = Math.trunc(Math.max(1, Math.min(200, limit)));
+    if (Number.isNaN(maxResults)) return [];
+    const matches: RecallEntry[] = [];
+    const rows = db.prepare('SELECT * FROM messages ORDER BY rowid DESC').iterate() as unknown as Iterable<RecallEntry>;
+    for (const row of rows) {
+      const text = terms.length ? row.text.toLowerCase() : "";
+      if (!terms.every(term => text.includes(term))) continue;
+      matches.push(row);
+      if (matches.length === maxResults) break;
+    }
+    return matches.reverse();
+  } finally {
+    db.close();
+  }
 }
 export function hasRecallSources(home:string,ids:string[]) {
   if(ids.length>200||new Set(ids).size!==ids.length)return false;
