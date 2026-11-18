@@ -28,3 +28,17 @@ test('agent_desktop rejects shell-style guesses with the real command list and p
 test('parseCommands stops at the next section', () => {
   assert.deepEqual(parseCommands('Commands:\n  a  x\n  b-c  y\n\nOptions:\n  -h  help\n'), ['a', 'b-c']);
 });
+
+test('tool previews unwrap JSON envelopes into short readable lines', async () => {
+  const { toolPreview } = await import('../dist/tui.js');
+  const guide = JSON.stringify({ ok: true, data: { content: Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n') } });
+  const shown = toolPreview(guide);
+  assert.match(shown, /^ {2}line 0\n {2}line 1\n/); assert.doesNotMatch(shown, /\\n/);
+  assert.match(shown, /… 28 more lines/);
+  assert.match(toolPreview('{"a":1}'), /"a": 1/);
+});
+test('run failures name the model and the way out', async () => {
+  const { runFailureMessage } = await import('../dist/harness.js');
+  assert.match(runFailureMessage({ reason: 'model_error', detail: 'Request timed out.' }, 'p/m'), /p\/m did not respond.*\/model/);
+  assert.match(runFailureMessage({ reason: 'turn_limit' }, 'p/m'), /turn limit/);
+});

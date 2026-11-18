@@ -14,7 +14,7 @@ import { inspectSkills, readSkill } from './skills.js';
 import { readActions } from './activity.js';
 import { capabilityReport } from './connectivity.js';
 import { Connections } from './connections.js';
-import { clean, makeTheme, themeNames, themeLabels, rule, banner as wordmark, playBanner, readLine, pick, spinner, type Command, type PickItem, type ThemeName } from './tui.js';
+import { clean, toolPreview, makeTheme, themeNames, themeLabels, rule, banner as wordmark, playBanner, readLine, pick, spinner, type Command, type PickItem, type ThemeName } from './tui.js';
 import { appModels, deviceId, subscriptionBlocked, FileCredentialStore } from './credentials.js';
 import { parseGoal, goalStatus, goalPrompt } from './goal.js';
 import { spawn } from 'node:child_process';
@@ -350,7 +350,7 @@ export async function chat(initialHome: string) {
     notes();
     line('/skill NAME reads instructions. /use NAME TASK requests a skill explicitly. Loaded skills appear in live activity and /actions.');
   };
-  const render: Emit = event => {
+    const render: Emit = event => {
     if (event.type === 'command_start') { panel('Command'); line(Array.isArray(event.command) ? event.command.join(' ') : String(event.command)); console.log(dim(event.cwd)); }
     else if (event.type === 'command_output') process.stdout.write(cleanText(event.text));
     else if (event.type === 'command_end') console.log('\n' + dim(event.error ? `Stopped / uncertain: ${event.error}` : `Exit code: ${event.exitCode}`));
@@ -359,7 +359,7 @@ export async function chat(initialHome: string) {
     else if (event.type === 'tool_result' && event.name !== 'bash') {
       const output = event.output as { type: string; text?: string }[] | undefined;
       const text = output?.filter(c => c.type === 'text').map(c => c.text).join('\n');
-      if (text) line(text.length > 3000 ? text.slice(0,3000) + '\n… display truncated' : text);
+      if (text) console.log(dim(toolPreview(text)));
     }
     else if (event.type === 'memory_active') console.log(dim(`Memory active: ${event.revision}${event.warning ? ' · '+event.warning : ''}`));
     else if (event.type === 'skill') console.log(theme.second(`◆ Using skill: ${event.name}`));

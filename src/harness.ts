@@ -63,6 +63,16 @@ export async function makeModels(model: string, baseUrl?: string): Promise<Model
   return models;
 }
 
+/** One readable line for a run that did not answer; raw detail stays in the runtime log. */
+export function runFailureMessage(result: unknown, model: string) {
+  const r = (result || {}) as { reason?: string; detail?: string; status?: string };
+  const detail = String(r.detail || '');
+  if (r.reason === "model_error" && /timed out|terminated|ETIMEDOUT|ECONNRESET/i.test(detail))
+    return `${model} did not respond (${detail.replace(/\.$/, "")}). The provider may be down or overloaded; nothing was lost. Try again, or switch with /model.`;
+  if (r.reason === "model_error") return `${model} returned an error: ${detail || "no detail"}. Try again, or switch with /model.`;
+  if (r.reason === "turn_limit") return "Stopped at the turn limit. Raise it in /runtime or ask the agent to continue.";
+  return `Run did not complete (${r.reason || r.status || "unknown"}${detail ? ": " + detail : ""}).`;
+}
 export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedModels?: Models, signal?: AbortSignal, suppliedConnections?: Connections): Promise<RunResult> {
   // Doer integration is on only when all four DOER_* variables are in the environment. Read before taking the lock.
   const doer = doerConfig();
@@ -187,7 +197,9 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     }
     harness = await Harness.open(await openNodeSqliteStorage(path.join(home, "state", "runtime.sqlite")), {
       models, registry, env: (target) => new LiveEnvironment({ cwd: target.cwd || cwd }),
-      settings: { toolExecution: "sequential", compaction: { enabled: settings.compaction }, retry: { maxRetries: 2 } },
+      // A provider that accepts the connection and never answers would otherwise hold a turn for the SDK's
+      // 10-minute default times every retry. Fail within a few minutes and say which model to switch.
+      settings: { toolExecution: "sequential", compaction: { enabled: settings.compaction }, retry: { maxRetries: 1 }, stream: { timeoutMs: 120_000, maxRetries: 0 } },
     }, context);
     const runtime = harness;
     const before = await runtime.usage(context);
@@ -207,7 +219,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       const result = await submission.wait(context);
       if (result.status !== "done" || result.type !== "input") {
         await runtime.commit(async tx => { (await tx.doc(State)).pending = null; }, context);
-        throw new Error(`Run did not complete: ${JSON.stringify(result)}`);
+        throw new Error(runFailureMessage(result, selected));
       }
       const entry = await runtime.commit(tx => tx.entry(AssistantEntry, result.answer), context);
       return (entry?.model || []).flatMap(message => message.role === "assistant" ? message.content.filter(c => c.type === "text").map(c => c.text) : []).join("\n");
