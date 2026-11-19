@@ -127,7 +127,16 @@ async function* completedAnswers(storage: Storage, id: ConversationId, order: 'a
     } while (cursor);
   }
 }
-export async function recoveryStatus(inputHome: string): Promise<{ pendingRequestId: string | null }> {
+export async function recoveryStatus(inputHome: string, verbose = false) {
+  const status = (pending?: Pending | null) => {
+    const pendingRequestId = pending?.requestId ?? null;
+    if (!verbose) return { pendingRequestId };
+    return {
+      pendingRequestId,
+      conversationId: pending?.conversation ?? null,
+      model: pending?.model ?? null,
+    };
+  };
   const home = await fs.realpath(inputHome);
   await readManifest(home);
   const release = await lockHome(home);
@@ -135,7 +144,7 @@ export async function recoveryStatus(inputHome: string): Promise<{ pendingReques
     const file = path.join(home, "state", "runtime.sqlite");
     try { await fs.access(file); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { pendingRequestId: null };
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return status();
       throw error;
     }
     const runtime = await Harness.open(await openNodeSqliteStorage(file), {
@@ -143,7 +152,7 @@ export async function recoveryStatus(inputHome: string): Promise<{ pendingReques
     }, context);
     try {
       const state = await runtime.snapshot(State, context);
-      return { pendingRequestId: state?.pending?.requestId ?? null };
+      return status(state?.pending);
     } finally {
       await runtime.close(context);
     }

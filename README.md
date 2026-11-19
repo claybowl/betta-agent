@@ -172,7 +172,7 @@ Read this before turning on the shell.
 betta-agents init HOME NAME PROVIDER/MODEL     create an agent
 betta-agents chat HOME                         interactive terminal
 betta-agents run HOME PROMPT [REQUEST_ID]      one headless turn
-betta-agents recovery-status HOME              show the interrupted request ID
+betta-agents recovery-status HOME [--verbose]  show the interrupted request ID
 betta-agents resume HOME                       finish interrupted work
 betta-agents inspect HOME                      show identity and state
 betta-agents export HOME NEW_DIR [--continuation] [--history]
@@ -184,7 +184,7 @@ betta-agents reflect HOME [--apply [ID] | --status | --list | --preview ID | --d
 
 `run` with the same `REQUEST_ID` executes once, however many times it is started.
 
-Use `betta-agents recovery-status HOME` to check for interrupted work before resuming. It prints JSON such as `{"pendingRequestId":"crash-proof"}` or `{"pendingRequestId":null}` and makes no provider calls.
+Use `betta-agents recovery-status HOME` to check for interrupted work before resuming. It prints JSON such as `{"pendingRequestId":"crash-proof"}` or `{"pendingRequestId":null}` and makes no provider calls. Add `--verbose` to include the saved `conversationId` and `model` in the same JSON object. All three fields are `null` when there is no interrupted request.
 
 When `resume` or standalone `run` recovers interrupted work, it prints the request ID to stderr and the final summary to stdout.
 

@@ -39,7 +39,7 @@ async function main() {
     return;
   }
   if (!homeArg || !["init", "chat", "run", "sessions", "recovery-status", "resume", "export", "inspect", "memory", "reflect", "memory-import"].includes(command || "")) {
-    console.log(`DIS Betta Agent Harness\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID] [--session ID]\nsessions HOME\nrecovery-status HOME\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\n${reflectionUsage}\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
+    console.log(`DIS Betta Agent Harness\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID] [--session ID]\nsessions HOME\nrecovery-status HOME [--verbose]\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\n${reflectionUsage}\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
     return;
   }
   const home = path.resolve(homeArg);
@@ -107,8 +107,9 @@ async function main() {
   } else if (command === "sessions") {
     console.log(JSON.stringify(await listSessions(home), null, 2));
   } else if (command === "recovery-status") {
-    if (args.length) throw new Error("Usage: recovery-status HOME");
-    console.log(JSON.stringify(await recoveryStatus(home)));
+    const verbose = args.length === 1 && args[0] === "--verbose";
+    if (args.length && !verbose) throw new Error("Usage: recovery-status HOME [--verbose]");
+    console.log(JSON.stringify(await recoveryStatus(home, verbose)));
   } else if (command === "chat") {
     await chat(home);
   } else {
