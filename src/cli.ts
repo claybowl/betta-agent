@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { memoryCommand, importMemoryBundle } from "./memory-service.js";
-import { reflect, applyReflection, previewReflection } from "./reflection.js";
+import { reflect, applyReflection, previewReflection, reflectionStatus } from "./reflection.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -32,13 +32,18 @@ async function main() {
     return;
   }
   if (!homeArg || !["init", "chat", "run", "sessions", "resume", "export", "inspect", "memory", "reflect", "memory-import"].includes(command || "")) {
-    console.log(`DIS Betta Agent Harness\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID] [--session ID]\nsessions HOME\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\nreflect HOME [--apply]\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
+    console.log(`DIS Betta Agent Harness\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID] [--session ID]\nsessions HOME\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\nreflect HOME [--apply | --status]\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
     return;
   }
   const home = path.resolve(homeArg);
   if (command === "memory") {
     const result=await memoryCommand(home,args[0]||'status',args.slice(1)); console.log(typeof result==='string'?result:JSON.stringify(result,null,2));
   } else if (command === "reflect") {
+    if (args.includes("--status")) {
+      if (args.includes("--apply")) throw new Error("Cannot combine --status and --apply.");
+      console.log(JSON.stringify(await reflectionStatus(home), null, 2));
+      return;
+    }
     const controller=new AbortController(); process.once('SIGTERM',()=>controller.abort());process.once('SIGINT',()=>controller.abort());
     const proposal=await reflect(home,undefined,controller.signal);
     console.log(JSON.stringify(args.includes('--apply')&&proposal.status==='ready'?await applyReflection(home,proposal.id):proposal.id==='none'?proposal:await previewReflection(home,proposal.id),null,2));

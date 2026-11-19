@@ -173,8 +173,10 @@ betta-agents resume HOME                       finish interrupted work
 betta-agents inspect HOME                      show identity and state
 betta-agents export HOME NEW_DIR [--continuation] [--history]
 betta-agents memory HOME COMMAND [ARGS]
-betta-agents reflect HOME [--apply]
+betta-agents reflect HOME [--apply | --status]
 ```
+
+`reflect HOME --status` prints the eligible evidence counts as JSON without calling the provider or changing reflection state. Use `--status` and `--apply` separately.
 
 `run` with the same `REQUEST_ID` executes once, however many times it is started.
 

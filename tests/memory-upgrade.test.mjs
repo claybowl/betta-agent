@@ -61,7 +61,7 @@ test('chat /reflect reaches older unconsumed evidence and skips it after apply a
   assert.match(chat('/reflect'), /No unconsumed conversation evidence\./);
   assert.equal(await fs.readFile(requestsPath, 'utf8'), requests);
 });
-test('chat /reflect status counts evidence without changing state or calling the provider', async t => {
+test('reflect status in chat and standalone counts evidence without changing state or calling the provider', async t => {
   const dir = await home(t, 'ollama/test');
   const expected = [
     { id: 'first:user', text: 'Prefer amber notebooks.' },
@@ -72,29 +72,46 @@ test('chat /reflect status counts evidence without changing state or calling the
   recordRecall(dir, 'second', 'main', 'assistant', expected[1].text);
   await saveState(dir, 'reflection-consumed.json', ['reviewed:user']);
   await saveState(dir, 'reflection-proposals.json', []);
-  const readState = name => fs.readFile(path.join(dir, 'state', name), 'utf8');
+  const readState = name => fs.readFile(path.join(dir, 'state', name));
   const consumedBefore = await readState('reflection-consumed.json');
   const proposalsBefore = await readState('reflection-proposals.json');
   const requestsPath = path.join(dir, 'requests.jsonl');
   const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
   const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
-  const chat = input => {
-    const result = spawnSync(process.execPath, ['--import', provider, cli, 'chat', dir], {
-      input: input + '\n/exit\n', encoding: 'utf8', timeout: 20_000,
+  const runCli = (command, args, input) =>
+    spawnSync(process.execPath, ['--import', provider, cli, command, dir, ...args], {
+      input, encoding: 'utf8', timeout: 20_000,
       env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
         COMPACT_REQUESTS: requestsPath, REFLECTION_FIXTURE_RESPONSE: '{"summary":"Reviewed","changes":[]}', NO_COLOR: '1' },
     });
+  const chat = input => {
+    const result = runCli('chat', [], input + '\n/exit\n');
     assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
     return result.stdout;
   };
 
   assert.equal([...chat('/reflect status\n/reflect status').matchAll(/"selectedMessages": 2\b/g)].length, 2);
   assert.match(chat('/reflect status'), /"selectedMessages": 2\b/);
-  await assert.rejects(fs.stat(requestsPath), { code: 'ENOENT' });
-  assert.equal(await readState('reflection-consumed.json'), consumedBefore);
-  assert.equal(await readState('reflection-proposals.json'), proposalsBefore);
+  const assertReadOnly = async () => {
+    await assert.rejects(fs.stat(requestsPath), { code: 'ENOENT' });
+    assert.deepEqual(await readState('reflection-consumed.json'), consumedBefore);
+    assert.deepEqual(await readState('reflection-proposals.json'), proposalsBefore);
+  };
+  await assertReadOnly();
+  for (let i = 0; i < 2; i++) {
+    const result = runCli('reflect', ['--status']);
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+    assert.equal(JSON.parse(result.stdout).selectedMessages, 2);
+    await assertReadOnly();
+  }
+  const conflict = runCli('reflect', ['--status', '--apply']);
+  assert.equal(conflict.status, 1, conflict.error?.message ?? conflict.stderr);
+  assert.match(conflict.stderr, /--status and --apply/);
+  await assertReadOnly();
 
-  assert.match(chat('/reflect'), /"status": "noop"/);
+  const reflection = runCli('reflect', []);
+  assert.equal(reflection.status, 0, reflection.error?.message ?? reflection.stderr);
+  assert.equal(JSON.parse(reflection.stdout).status, 'noop');
   const requests = (await fs.readFile(requestsPath, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(requests.length, 1);
   const { evidence } = JSON.parse(requests[0].messages.at(-1).content);
