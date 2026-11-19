@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { createModels } from '@earendil-works/pi-ai';
 import { fauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai/providers/faux';
@@ -100,6 +101,45 @@ test('SIGKILL after a memory effect recovers the same submission without duplica
  const check=fake([]);
  const again=await runAgent({home:dir,prompt:'Remember the blue boat.',requestId:'crash-proof'},undefined,check.models);
  assert.equal(again.summary,'Recovered and remembered.'); assert.equal(check.faux.state.callCount,0);
+});
+test('standalone resume reports the interrupted request before provider output', { timeout: 30_000 }, async t => {
+ const dir = await home(t);
+ const manifestPath = path.join(dir, 'agent.json');
+ const manifest = await readManifest(dir);
+ await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, model: 'ollama/test' }));
+ const env = { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config') };
+ const crashed = spawnSync(process.execPath, [fixture, dir, 'crash', 'ollama'], {
+   env, encoding: 'utf8', timeout: 10_000,
+ });
+ assert.equal(crashed.signal, 'SIGKILL', crashed.error?.message ?? crashed.stderr);
+ assert.equal((await readMemory(path.join(dir, 'memory'), 'learned.md')).content, 'Remember the blue boat.\n');
+
+ const provider = fileURLToPath(new URL('./resume-provider.mjs', import.meta.url));
+ const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+ const child = spawn(process.execPath, ['--import', provider, cli, 'resume', dir], {
+   env, timeout: 10_000, killSignal: 'SIGKILL',
+ });
+ const notice = 'Recovering interrupted run crash-proof';
+ let stdout = '', stderr = '', stdoutAtNotice;
+ child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+ child.stderr.setEncoding('utf8').on('data', chunk => {
+   stderr += chunk;
+   if (stdoutAtNotice === undefined && stderr.split('\n').includes(notice)) {
+     stdoutAtNotice = stdout;
+     child.stdin.end();
+   }
+ });
+ const [status, signal] = await once(child, 'close');
+ assert.equal(stdoutAtNotice, '', `Expected recovery notice before output. stderr: ${stderr}`);
+ assert.equal(status, 0, `Resume exited with ${signal ?? status}. stderr: ${stderr}`);
+ assert.equal(stderr.split('\n').filter(line => line.includes('Recovering interrupted run')).length, 1);
+ assert.equal(stdout, 'Recovered and remembered.\n');
+
+ const fresh = spawnSync(process.execPath, ['--import', provider, cli, 'run', dir, 'Fresh prompt'], {
+   env, input: '', encoding: 'utf8', timeout: 5_000,
+ });
+ assert.equal(fresh.status, 0, fresh.error?.message ?? fresh.stderr);
+ assert.doesNotMatch(fresh.stderr, /Recovering interrupted run/);
 });
 test('copy export changes identity; continuation snapshot retains sessions',async t=>{
  const dir=await home(t), parent=await fs.mkdtemp(path.join(os.tmpdir(),'donjon-export-'));

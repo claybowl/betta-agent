@@ -73,6 +73,7 @@ async function main() {
     const requestId = sessionIndex === 1 ? undefined : args[1];
     const result = await runAgent({ home, prompt: args[0], requestId: requestId || (doer ? undefined : randomUUID()), session, resumeOnly: command === "resume" },
       event => {
+        if (command === "resume" && event.type === "recovery") console.error(`Recovering interrupted run ${event.requestId}`);
         if (doer && event.type === "doer") console.error(`[doer] ${JSON.stringify(event)}`);
         const progress = providerProgressText(event);
         if (progress) console.error(progress);
