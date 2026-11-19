@@ -180,7 +180,7 @@ betta-agents reflect HOME [--apply [ID] | --status | --list | --preview ID | --d
 
 `run` with the same `REQUEST_ID` executes once, however many times it is started.
 
-When `resume` recovers interrupted work, it prints the request ID to stderr and the final summary to stdout.
+When `resume` or standalone `run` recovers interrupted work, it prints the request ID to stderr and the final summary to stdout.
 
 ### Agent home layout
 
