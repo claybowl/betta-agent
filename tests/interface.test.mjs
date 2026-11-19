@@ -80,3 +80,60 @@ test('runtime timeout cancels work instead of queuing it for the next wake',asyn
  await assert.rejects(fs.access(path.join(dir,'TOO_LATE')));
  assert.equal((await runAgent({home:dir,resumeOnly:true},undefined,fake([]))).summary,'No unfinished work.');
 });
+
+test('chat /compact reduces provider input after restart and preserves recall', async t => {
+  const old = 'lantern atlas sentinel';
+  const recent = 'The last shipment was cobalt.';
+  const core = 'Always use the silver checklist.';
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const counts = [];
+  for (const compact of [false, true]) {
+    const dir = await home(t);
+    const manifestPath = path.join(dir, 'agent.json');
+    const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+    await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, model: 'ollama/test' }));
+    await fs.writeFile(path.join(dir, 'memory', 'persona.md'), core + '\n');
+    const settings = await readSettings(dir);
+    await saveSettings(dir, { ...settings, compaction: false });
+    const requestsPath = path.join(dir, 'requests.jsonl');
+    const chat = (input, cancel = false) => {
+      const result = spawnSync(process.execPath, ['--import', provider, cli, 'chat', dir], {
+        env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'), COMPACT_REQUESTS: requestsPath, COMPACT_CANCEL: cancel ? '1' : '0', NO_COLOR: '1' },
+        input, encoding: 'utf8', timeout: 20_000,
+      });
+      assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+      return result.stdout;
+    };
+    const setup = chat([
+      old + ' ' + 'stock ledger '.repeat(2200),
+      'stock ledger '.repeat(5600), recent, '/sessions', '/exit', '',
+    ].join('\n'));
+    const session = setup.match(/^(.+?)  \d{4}-\d{2}-\d{2}T/m)?.[1];
+    assert.ok(session, setup);
+    if (compact) {
+      if (process.platform !== 'win32') {
+        const stopped = chat(`/session ${session}\n/compact\n/exit\n`, true);
+        assert.match(stopped, /Compaction stopped\./, stopped);
+        assert.doesNotMatch(stopped, /Conversation compacted\./);
+      }
+      const output = chat(`/session ${session}\n/compact\n/sessions\n/exit\n`);
+      assert.match(output, /Conversation compacted\./, output);
+      assert.ok(output.split('\n').some(line => line.startsWith(session) && line.endsWith(' · selected')), output);
+    }
+    chat(`/session ${session}\nCheck current context\nFind the original message\n/exit\n`);
+    const requests = (await fs.readFile(requestsPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const probe = requests.find(({ messages }) => messages.at(-1).content === 'Check current context');
+    assert.ok(probe);
+    const messages = JSON.stringify(probe.messages);
+    assert.ok(messages.includes(recent));
+    assert.ok(messages.includes(core));
+    assert.equal(messages.includes(old), !compact);
+    // The scripted provider's tokenizer splits the input into word and punctuation tokens.
+    counts.push((JSON.stringify({ messages: probe.messages, tools: probe.tools }).match(/\w+|[^\w\s]/g) ?? []).length);
+    assert.ok(requests.some(({ messages }) => messages.some(message =>
+      message.role === 'tool' && message.content.includes(old + ' stock ledger'))));
+  }
+  assert.ok(counts[1] < counts[0], `Uncompacted vs. compacted input tokens: ${counts.join(' vs. ')}`);
+  t.diagnostic(`Scripted input tokens: ${counts[0]} uncompacted, ${counts[1]} compacted`);
+});

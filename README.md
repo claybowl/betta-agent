@@ -92,6 +92,7 @@ Type `/` and the palette appears under the prompt. Keep typing to filter, Tab to
 | `/tools` | Show live permissions, server status, and discovered MCP tools |
 | `/connections` | Add and manage MCP servers |
 | `/cwd [PATH]` | Set the folder the agent works in |
+| `/compact` | Summarize older context in the selected conversation |
 | `/runtime` | Turn limit, compaction, timeout |
 | `/actions` | Recent tool calls and their outcomes |
 | `/resume` | Continue work interrupted by a crash |
@@ -99,6 +100,8 @@ Type `/` and the palette appears under the prompt. Keep typing to filter, Tab to
 | `/clear` · `/exit` | Clear the screen, leave |
 
 Use `/session default` to return to the default conversation. To continue from a script, list IDs with `betta-agents sessions HOME` and pass one to `betta-agents run HOME PROMPT --session ID`. The `/resume` command still recovers interrupted work.
+
+`/compact` runs on demand even when automatic compaction is off. It keeps the conversation selected and leaves original messages available to recall.
 
 Set `NO_COLOR=1` for no colors, or `DONJON_NO_MOTION=1` to skip the startup animation.
 

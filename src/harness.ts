@@ -145,6 +145,84 @@ export async function listSessions(inputHome: string) {
     release();
   }
 }
+export async function compactSession(inputHome: string, session: string | undefined, signal: AbortSignal) {
+  const home = await fs.realpath(inputHome);
+  const manifest = await readManifest(home);
+  const settings = await readSettings(home);
+  const cwd = await fs.realpath(settings.cwd || home);
+  const release = await lockHome(home);
+  const timeout = settings.timeoutSeconds ? AbortSignal.timeout(settings.timeoutSeconds * 1000) : undefined;
+  const runSignal = timeout ? AbortSignal.any([signal, timeout]) : signal;
+  const file = path.join(home, "state", "runtime.sqlite");
+  const noConversation = "No conversation to compact in this working directory.";
+  try {
+    runSignal.throwIfAborted();
+    try { await fs.access(file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return noConversation; throw error; }
+    const reader = await Harness.open(await openNodeSqliteStorage(file), {
+      models: createModels(), registry: createRegistry(), readOnly: true,
+    }, context);
+    let id: ConversationId | undefined;
+    let model: string;
+    try {
+      const state = await reader.snapshot(State, context);
+      if (!state) return noConversation;
+      if (state.pending) throw new Error("Use /resume to finish interrupted work before compacting.");
+      id = session
+        ? Object.values(state.conversations).find(id => session === `${manifest.id}:${id}`)
+        : state.conversations[workspaceKey(home, cwd)];
+      const conversation = id === undefined ? undefined : await sessionInWorkspace(reader, state.conversations, id, home, cwd);
+      if (id === undefined || !conversation) {
+        if (session) throw new Error("Unknown session for this agent and working directory.");
+        return noConversation;
+      }
+      const ref = (await conversation.agent(context)).model;
+      if (!ref) throw new Error("The conversation has no configured model.");
+      model = `${ref.provider}/${ref.modelId}`;
+    } finally {
+      await reader.close(context);
+    }
+    const models = await makeModels(model);
+    runSignal.throwIfAborted();
+    const runtime = await Harness.open(await openNodeSqliteStorage(file), {
+      models, registry: createRegistry(),
+      settings: { compaction: { enabled: settings.compaction }, retry: { maxRetries: 1 }, stream: { timeoutMs: 120_000, maxRetries: 0 } },
+    }, context);
+    try {
+      const conversation = await runtime.conversation(id, context);
+      if (!conversation) throw new Error("Stored conversation is missing");
+      runSignal.throwIfAborted();
+      const task = await conversation.compact(undefined, context);
+      let abortWork: ReturnType<typeof runtime.abortTask> | undefined;
+      const abort = () => {
+        abortWork = runtime.abortTask(task, context);
+        void abortWork.catch(() => {});
+      };
+      runSignal.addEventListener("abort", abort, { once: true });
+      if (runSignal.aborted) abort();
+      try {
+        const { state: { outcome } } = await runtime.waitForTask(task, context);
+        if (outcome.status === "failed") throw new Error(providerMessage(outcome.error.message));
+        if (outcome.status !== "completed") {
+          runSignal.throwIfAborted();
+          throw new Error("Compaction was stopped.");
+        }
+        const result = outcome.result as { submissionId?: SubmissionId };
+        if (result.submissionId === undefined) return "No older context to compact.";
+        const submission = await runtime.submission(result.submissionId, context);
+        if ((await submission?.wait(context))?.status !== "done") throw new Error("Compaction summary could not be saved.");
+        return "Conversation compacted.";
+      } finally {
+        runSignal.removeEventListener("abort", abort);
+        await abortWork;
+      }
+    } finally {
+      await runtime.close(context);
+    }
+  } finally {
+    release();
+  }
+}
 export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedModels?: Models, signal?: AbortSignal, suppliedConnections?: Connections): Promise<RunResult> {
   // Doer integration is on only when all four DOER_* variables are in the environment. Read before taking the lock.
   const doer = doerConfig();

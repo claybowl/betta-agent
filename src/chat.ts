@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { emitKeypressEvents } from 'node:readline';
 import { readManifest, initHome, lockHome } from './home.js';
-import { listSessions, runAgent, type Emit } from './harness.js';
+import { compactSession, listSessions, runAgent, type Emit } from './harness.js';
 import { readApp, saveApp, readSettings, saveSettings, listAgents, atomicJson, configRoot, type AgentSettings, type Connection } from './settings.js';
 import { inspectSkills, readSkill } from './skills.js';
 import { readActions } from './activity.js';
@@ -37,6 +37,7 @@ const commandList: Command[] = [
   { name: '/reflect', description: 'Propose learning; list, apply ID, settings' },
   { name: '/settings', description: 'Browse settings' },
   { name: '/permissions', description: 'Shell, file writes, MCP' },
+  { name: '/compact', description: 'Summarize older context in the selected conversation' },
   { name: '/runtime', description: 'Model, turn limit, compaction, timeout' },
   { name: '/connections', description: 'Connect browsers and MCP servers' },
   { name: '/prompt', description: 'View or edit this agent’s system instructions' },
@@ -374,7 +375,7 @@ export async function chat(initialHome: string) {
       if (progress) console.log(dim(progress));
     }
   };
-  const run = async (prompt: string, resumeOnly = false, task?: (signal: AbortSignal) => Promise<string>) => {
+  const run = async (prompt: string, resumeOnly = false, task?: (signal: AbortSignal) => Promise<string>, taskTitle = 'Memory reflection') => {
     const controller = new AbortController(), started = Date.now();
     let doing = '';
     const spin = spinner(theme, () => `Working · ${Math.round((Date.now() - started) / 1000)}s${doing ? ' · ' + doing : ''} · Esc to stop`);
@@ -397,13 +398,14 @@ export async function chat(initialHome: string) {
     if (process.stdin.isTTY) { emitKeypressEvents(process.stdin); process.stdin.setRawMode(true); process.stdin.on('keypress', keypress); process.stdin.resume(); }
     try {
       if (tty) spin.start(); else console.log(dim('Working… Esc to stop'));
-      if (task) { const text = await task(controller.signal); spin.stop(); panel('Memory reflection'); line(text); return; }
+      if (task) { const text = await task(controller.signal); spin.stop(); panel(taskTitle); line(text); return; }
       const result = await runAgent({ home, prompt, requestId: randomUUID(), resumeOnly, session }, live, undefined, controller.signal, connections);
       spin.stop(); panel(manifest.name); line(result.summary); console.log(dim(`${result.usage.inputTokens} in · ${result.usage.outputTokens} out · $${result.costUsd.toFixed(4)}`));
       return result;
     } catch (error) {
       spin.stop();
-      if (controller.signal.aborted) { line('Turn stopped. Use /actions to inspect outcomes; /resume will not restart this cancelled turn.'); }
+      if (controller.signal.aborted && taskTitle === 'Compaction') { line('Compaction stopped.'); }
+      else if (controller.signal.aborted) { line('Turn stopped. Use /actions to inspect outcomes; /resume will not restart this cancelled turn.'); }
       else throw error;
     } finally {
       spin.stop();
@@ -531,6 +533,10 @@ export async function chat(initialHome: string) {
         }
         else if (cmd === '/prompt') await systemPrompt(arg || undefined);
         else if (cmd === '/permissions') await permissions();
+        else if (cmd === '/compact') {
+          if (arg) throw new Error('Usage: /compact');
+          await run('', false, signal => compactSession(home, session, signal), 'Compaction');
+        }
         else if (cmd === '/runtime') await runtime();
         else if (cmd === '/app') await appearance();
         else if (cmd === '/cwd') await changeCwd(arg);
