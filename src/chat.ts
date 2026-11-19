@@ -1,5 +1,5 @@
 import { memoryCommand } from './memory-service.js';
-import { reflect, previewReflection, proposals, applyReflection, discardReflection, retryReflection, reflectionSettings } from './reflection.js';
+import { reflect, previewReflection, proposals, applyReflection, discardReflection, retryReflection, reflectionSettings, reflectionStatus } from './reflection.js';
 import { saveState } from './memfs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -34,7 +34,7 @@ const commandList: Command[] = [
   { name: '/skill', description: 'Read skill instructions · /skill NAME' },
   { name: '/use', description: 'Ask the agent to use a skill · /use NAME TASK' },
   { name: '/memory', description: 'Memory status, search, history, sync' },
-  { name: '/reflect', description: 'Propose learning; list, apply ID, settings' },
+  { name: '/reflect', description: 'Propose learning; status, list, apply ID, settings' },
   { name: '/settings', description: 'Browse settings' },
   { name: '/permissions', description: 'Shell, file writes, MCP' },
   { name: '/compact', description: 'Summarize older context in the selected conversation' },
@@ -522,6 +522,7 @@ export async function chat(initialHome: string) {
         else if (cmd === '/reflect') {
           const [action,id] = arg.split(/\s+/);
           if(!action || action==='preview') await run('',false,async signal=>{const p=id?await previewReflection(home,id):await reflect(home,undefined,signal);return JSON.stringify(p.id==='none'?p:await previewReflection(home,p.id),null,2);});
+          else if(action==='status') line(JSON.stringify(await reflectionStatus(home),null,2));
           else if(action==='list') line(JSON.stringify(await proposals(home),null,2));
           else if(action==='apply') line(JSON.stringify(await applyReflection(home,id),null,2));
           else if(action==='retry') await run('',false,async()=>JSON.stringify(await retryReflection(home,id),null,2));
@@ -530,7 +531,7 @@ export async function chat(initialHome: string) {
             line(JSON.stringify(await reflectionSettings(home),null,2));
             const json=await ask('Reflection settings as JSON (Enter returns) > ');
             if(json) { const release=await lockHome(home);const prior=await reflectionSettings(home);try { await saveState(home,'reflection-settings.json',JSON.parse(json));try{await reflectionSettings(home);}catch(e){await saveState(home,'reflection-settings.json',prior);throw e;} }finally{release();}line('Reflection settings saved.'); }
-          } else throw new Error('/reflect preview | list | apply ID | discard ID | retry ID | settings');
+          } else throw new Error('/reflect status | preview | list | apply ID | discard ID | retry ID | settings');
         }
         else if (cmd === '/prompt') await systemPrompt(arg || undefined);
         else if (cmd === '/permissions') await permissions();

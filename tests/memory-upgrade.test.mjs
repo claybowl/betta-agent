@@ -61,6 +61,57 @@ test('chat /reflect reaches older unconsumed evidence and skips it after apply a
   assert.match(chat('/reflect'), /No unconsumed conversation evidence\./);
   assert.equal(await fs.readFile(requestsPath, 'utf8'), requests);
 });
+test('chat /reflect status counts evidence without changing state or calling the provider', async t => {
+  const dir = await home(t, 'ollama/test');
+  const expected = [
+    { id: 'first:user', text: 'Prefer amber notebooks.' },
+    { id: 'second:assistant', text: 'Use a pencil for drafts.' },
+  ];
+  recordRecall(dir, 'reviewed', 'main', 'user', 'Previously reviewed evidence.');
+  recordRecall(dir, 'first', 'main', 'user', expected[0].text);
+  recordRecall(dir, 'second', 'main', 'assistant', expected[1].text);
+  await saveState(dir, 'reflection-consumed.json', ['reviewed:user']);
+  await saveState(dir, 'reflection-proposals.json', []);
+  const readState = name => fs.readFile(path.join(dir, 'state', name), 'utf8');
+  const consumedBefore = await readState('reflection-consumed.json');
+  const proposalsBefore = await readState('reflection-proposals.json');
+  const requestsPath = path.join(dir, 'requests.jsonl');
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const chat = input => {
+    const result = spawnSync(process.execPath, ['--import', provider, cli, 'chat', dir], {
+      input: input + '\n/exit\n', encoding: 'utf8', timeout: 20_000,
+      env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
+        COMPACT_REQUESTS: requestsPath, REFLECTION_FIXTURE_RESPONSE: '{"summary":"Reviewed","changes":[]}', NO_COLOR: '1' },
+    });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+    return result.stdout;
+  };
+
+  assert.equal([...chat('/reflect status\n/reflect status').matchAll(/"selectedMessages": 2\b/g)].length, 2);
+  assert.match(chat('/reflect status'), /"selectedMessages": 2\b/);
+  await assert.rejects(fs.stat(requestsPath), { code: 'ENOENT' });
+  assert.equal(await readState('reflection-consumed.json'), consumedBefore);
+  assert.equal(await readState('reflection-proposals.json'), proposalsBefore);
+
+  assert.match(chat('/reflect'), /"status": "noop"/);
+  const requests = (await fs.readFile(requestsPath, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(requests.length, 1);
+  const { evidence } = JSON.parse(requests[0].messages.at(-1).content);
+  assert.deepEqual(evidence.map(({ id, text }) => ({ id, text })), expected);
+
+  await saveState(dir, 'reflection-consumed.json', ['reviewed:user', ...expected.map(({ id }) => id)]);
+  assert.match(chat('/reflect status'), /No unconsumed conversation evidence/);
+  await saveState(dir, 'reflection-settings.json', { maxInputCharacters: 1000 });
+  recordRecall(dir, 'oversized', 'main', 'user', 'x'.repeat(1000));
+  recordRecall(dir, 'short', 'main', 'user', 'Fits on its own.');
+  const blocked = chat('/reflect status');
+  assert.match(blocked, /"selectedMessages": 0\b/);
+  assert.match(blocked, /"windowMessages": 2\b/);
+  assert.match(blocked, /next recall message exceeds the reflection input budget/);
+  assert.equal((await fs.readFile(requestsPath, 'utf8')).trim().split('\n').length, 1);
+});
+
 test('migration preserves originals in history, adds frontmatter/indexes, and is repeatable',async t=>{
  const dir=await home(t),root=path.join(dir,'memory'),before=await head(root);
  await fs.mkdir(path.join(root,'projects'));await fs.writeFile(path.join(root,'projects','work.md'),'A durable project fact.');
