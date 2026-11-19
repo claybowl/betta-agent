@@ -151,6 +151,27 @@ test('reflection lists saved proposals across processes and reaches older uncons
   assert.equal(await head(memoryRoot), appliedHead);
   assert.deepEqual((await readReflectionState())[1], stateBeforeDiscard[1]);
   assert.deepEqual(await fs.readFile(requestsPath), requestsBeforeDiscard);
+
+  recordRecall(dir, 'confirmed', 'main', 'user', 'Prefer blue folders.');
+  response = JSON.stringify({
+    summary: 'Confirmed folder preference',
+    changes: [{ path: 'folders.md', content: 'Prefer blue folders.', sourceIds: ['confirmed:user'] }],
+  });
+  assert.match(chat('/reflect'), /"status": "ready"/);
+  const folderProposal = list().find(item => item.status === 'ready');
+  assert.ok(folderProposal);
+  const headBeforeApply = await head(memoryRoot);
+  const malformedApply = chat(`/reflect apply ${folderProposal.id} extra-id\n/reflect apply\n/reflect list`);
+  assert.equal([...malformedApply.matchAll(/Usage: \/reflect apply ID/g)].length, 2, malformedApply);
+  const savedAfterMalformedApply = list();
+  assert.ok(malformedApply.includes(JSON.stringify(savedAfterMalformedApply, null, 2)), malformedApply);
+  assert.deepEqual(savedAfterMalformedApply.find(item => item.id === folderProposal.id), folderProposal);
+  assert.equal(await head(memoryRoot), headBeforeApply);
+  await assert.rejects(fs.stat(path.join(memoryRoot, 'folders.md')), { code: 'ENOENT' });
+
+  assert.match(chat(`/reflect apply ${folderProposal.id}`), /"status": "applied"/);
+  assert.equal(list().find(item => item.id === folderProposal.id).status, 'applied');
+  assert.equal((await committedFiles(memoryRoot)).get('folders.md'), 'Prefer blue folders.');
 });
 test('standalone reflect retries a saved failure only when requested', async t => {
   const dir = await home(t, 'ollama/test');
