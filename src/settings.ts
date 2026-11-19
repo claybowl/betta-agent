@@ -13,6 +13,8 @@ export interface AgentSettings {
   permissions: { shell: boolean; files: boolean; mcp: boolean; network?: boolean; browser?: boolean; desktop?: boolean };
   connections: Connection[];
 }
+/** Tool rounds per request. 50 was the old default and cut off ordinary multi-file work; saved 50s move up once on read. */
+export const DEFAULT_MAX_TURNS = 150;
 export interface AppSettings { version: 1; theme: 'magic' | 'purple' | 'plain'; banner: boolean; agentHomes: string[]; look?: 2 }
 export const configRoot = () => process.env.DONJON_CONFIG_DIR || path.join(os.homedir(), '.donjon');
 async function json(file: string): Promise<any> {
@@ -28,7 +30,7 @@ export async function atomicJson(file: string, value: unknown) {
   await fs.rename(temp, file);
 }
 export function validateSettings(s: AgentSettings): AgentSettings {
-  if (s.version !== 1 || !Number.isInteger(s.maxTurns) || s.maxTurns < 1 || s.maxTurns > 500 ||
+  if (s.version !== 1 || !Number.isInteger(s.maxTurns) || s.maxTurns < 1 || s.maxTurns > 1000 ||
       !Number.isInteger(s.timeoutSeconds) || s.timeoutSeconds < 0 || s.timeoutSeconds > 86400 ||
       typeof s.compaction !== 'boolean' || (s.cwd !== undefined && (typeof s.cwd !== 'string' || !path.isAbsolute(s.cwd))) ||
       !s.permissions || ['shell','files','mcp'].some(k => typeof s.permissions[k as keyof AgentSettings['permissions']] !== 'boolean') ||
@@ -51,8 +53,10 @@ export function validateSettings(s: AgentSettings): AgentSettings {
 }
 export async function readSettings(home: string): Promise<AgentSettings> {
   const manifest = await readManifest(home);
-  return validateSettings(await json(path.join(home, 'settings.json')) ?? {
-    version: 1, maxTurns: 50, compaction: true, timeoutSeconds: 0,
+  const saved = await json(path.join(home, 'settings.json')) as AgentSettings | undefined;
+  if (saved && saved.maxTurns === 50) saved.maxTurns = DEFAULT_MAX_TURNS;
+  return validateSettings(saved ?? {
+    version: 1, maxTurns: DEFAULT_MAX_TURNS, compaction: true, timeoutSeconds: 0,
     permissions: { shell: manifest.allowShell, files: manifest.allowShell, mcp: false, network: false }, connections: [],
   });
 }

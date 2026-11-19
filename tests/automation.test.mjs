@@ -42,3 +42,25 @@ test('run failures name the model and the way out', async () => {
   assert.match(runFailureMessage({ reason: 'model_error', detail: 'Request timed out.' }, 'p/m'), /p\/m did not respond.*\/model/);
   assert.match(runFailureMessage({ reason: 'turn_limit' }, 'p/m'), /turn limit/);
 });
+
+test('provider error bodies become one readable line, including nested Gemini errors', async () => {
+  const { runFailureMessage } = await import('../dist/harness.js');
+  const gemini = JSON.stringify({ error: { message: JSON.stringify({ error: { code: 429, message: 'You exceeded your current quota, please check your plan.' } }, null, 2) } });
+  const m = runFailureMessage({ reason: 'model_error', detail: gemini }, 'google/x');
+  assert.match(m, /429 You exceeded your current quota/); assert.match(m, /billing or rate limit/); assert.doesNotMatch(m, /[{}]/);
+  assert.match(runFailureMessage({ reason: 'model_error', detail: '402 {"error":{"message":"Insufficient credits."}}' }, 'o/x'), /402 Insufficient credits\./);
+});
+test('bash defaults to a bounded timeout and says each call is a fresh shell', async () => {
+  const { boundedBash, DEFAULT_BASH_TIMEOUT_SECONDS } = await import('../dist/harness.js');
+  const seen = []; const tool = boundedBash({ name: 'bash', description: 'Run.', execute: async a => seen.push(a) });
+  await tool.execute({ command: 'x' }); await tool.execute({ command: 'y', timeout: 900 });
+  assert.equal(seen[0].timeout, DEFAULT_BASH_TIMEOUT_SECONDS); assert.equal(seen[1].timeout, 900);
+  assert.match(tool.description, /fresh shell/); assert.match(tool.description, /Stdin is closed/);
+});
+test('agents saved with the old 50-turn default move to the new default; other choices are kept', async t => {
+  const { initHome } = await import('../dist/home.js'); const { readSettings, saveSettings, DEFAULT_MAX_TURNS } = await import('../dist/settings.js');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'betta-turns-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await initHome(dir, 'T', 'faux/test'); const s = await readSettings(dir); assert.equal(s.maxTurns, DEFAULT_MAX_TURNS);
+  await fs.writeFile(path.join(dir, 'settings.json'), JSON.stringify({ ...s, maxTurns: 50 })); assert.equal((await readSettings(dir)).maxTurns, DEFAULT_MAX_TURNS);
+  s.maxTurns = 30; await saveSettings(dir, s); assert.equal((await readSettings(dir)).maxTurns, 30);
+});

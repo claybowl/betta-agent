@@ -182,7 +182,7 @@ export async function chat(initialHome: string) {
       for (let at = 'model';;) {
         const picked = await pick<string>({ title: 'Runtime · ' + manifest.name, theme, filter: false, receipt: false, select: at, hint: '↑↓ move · Enter changes · Esc done', items: [
           { label: 'model', value: 'model', badge: manifest.model, detail: 'pick from the live list' },
-          { label: 'maxTurns', value: 'maxTurns', badge: String(settings.maxTurns), detail: '1–500 turns per request' },
+          { label: 'maxTurns', value: 'maxTurns', badge: String(settings.maxTurns), detail: '1–1000 tool rounds per request' },
           { label: 'compaction', value: 'compaction', badge: settings.compaction ? '● on' : '○ off', tone: settings.compaction ? 'ok' : 'dim', detail: 'summarise long conversations' },
           { label: 'timeout', value: 'timeout', badge: settings.timeoutSeconds ? settings.timeoutSeconds + 's' : 'unlimited', detail: 'seconds per run; 0 = unlimited' }] });
         if (!picked) return;

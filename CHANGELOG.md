@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Default turn limit raised from 50 to 150 tool rounds (cap 1000); agents still on the old 50 move up once. Hitting the limit now says to type "continue".
+- Shell commands default to a 120-second timeout instead of none, and the bash tool tells the model each call is a fresh shell with stdin closed.
+- Provider billing and rate-limit errors (402/429) show the provider's message instead of raw JSON.
+
 ## 0.6.0
 
 - Add the native Doer worker protocol and agent-scoped work memory.
