@@ -21,6 +21,48 @@ function fake(responses) {
  models.setProvider(faux.provider); faux.setResponses(responses);
  return {models,faux};
 }
+test('a silent provider reports elapsed time before succeeding without a retry', { timeout: 15_000 }, async t => {
+ const dir = await home(t);
+ const { promise, resolve } = Promise.withResolvers();
+ // Keep the provider silent until the observer sees the wait. The fallback lets the assertion fail if no wait arrives.
+ const fallback = setTimeout(resolve, 10_000);
+ t.after(() => clearTimeout(fallback));
+ const { models, faux } = fake([async () => {
+   await promise;
+   return fauxAssistantMessage('Delayed answer.');
+ }]);
+ const events = [];
+ const result = await runAgent({ home: dir, prompt: 'Wait', requestId: 'wait' }, event => {
+   if (event.type === 'provider_wait' || event.type === 'provider_retry') events.push(event);
+   if (event.type === 'provider_wait') resolve();
+ }, models);
+ assert.equal(result.summary, 'Delayed answer.');
+ assert.equal(faux.state.callCount, 1);
+ assert.equal(events.length, 1);
+ assert.equal(events[0].type, 'provider_wait');
+ assert.equal(events[0].model, 'faux/test');
+ assert.ok(events[0].elapsedMs >= 5_000);
+});
+
+test('an observed durable retry is reported once before the second attempt succeeds', async t => {
+ const dir = await home(t);
+ const { models, faux } = fake([
+   () => { throw new Error('503 temporarily unavailable'); },
+   fauxAssistantMessage('Recovered answer.'),
+ ]);
+ const events = [];
+ const result = await runAgent({ home: dir, prompt: 'Retry', requestId: 'retry' }, event => {
+   if (event.type === 'provider_retry' || event.type === 'provider_wait') events.push(event);
+ }, models);
+ assert.equal(result.summary, 'Recovered answer.');
+ assert.equal(faux.state.callCount, 2);
+ assert.equal(events.length, 1);
+ assert.equal(events[0].type, 'provider_retry');
+ assert.equal(events[0].model, 'faux/test');
+ assert.equal(events[0].attempt, 2);
+ assert.ok(events[0].delayMs > 0);
+});
+
 test('memory survives fresh sessions and duplicate requests do not call the model again', async t=>{
  const dir=await home(t);
  await writeMemory(path.join(dir,'memory'),'human.md','Clay prefers concise answers.',''+(await readMemory(path.join(dir,'memory'),'human.md')).sha256);

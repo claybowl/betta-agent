@@ -14,7 +14,7 @@ import { inspectSkills, readSkill } from './skills.js';
 import { readActions } from './activity.js';
 import { capabilityReport } from './connectivity.js';
 import { Connections } from './connections.js';
-import { clean, toolPreview, makeTheme, themeNames, themeLabels, rule, banner as wordmark, playBanner, readLine, pick, spinner, type Command, type PickItem, type ThemeName } from './tui.js';
+import { clean, toolPreview, providerProgressText, makeTheme, themeNames, themeLabels, rule, banner as wordmark, playBanner, readLine, pick, spinner, type Command, type PickItem, type ThemeName } from './tui.js';
 import { appModels, deviceId, subscriptionBlocked, FileCredentialStore } from './credentials.js';
 import { parseGoal, goalStatus, goalPrompt } from './goal.js';
 import { spawn } from 'node:child_process';
@@ -369,6 +369,10 @@ export async function chat(initialHome: string) {
     else if (event.type === 'recovery') console.log(theme.warn(`Recovering interrupted run ${event.requestId}`));
     else if (event.type === 'connection') console.log(dim(`MCP ${event.name}: ${event.status}${event.message ? ' · ' + event.message : ''}`));
     else if (event.type === 'connection_log') console.log(dim(`[${event.name}] ${event.text}`));
+    else {
+      const progress = providerProgressText(event);
+      if (progress) console.log(dim(progress));
+    }
   };
   const run = async (prompt: string, resumeOnly = false, task?: (signal: AbortSignal) => Promise<string>) => {
     const controller = new AbortController(), started = Date.now();

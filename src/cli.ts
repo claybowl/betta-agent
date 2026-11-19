@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { chat } from "./chat.js";
+import { providerProgressText } from "./tui.js";
 import { initHome, readManifest, exportHome } from "./home.js";
 import { listSessions, runAgent, type RunInput } from "./harness.js";
 import { doerConfig } from "./doer.js";
@@ -60,7 +61,7 @@ async function main() {
     await chat(home);
   } else {
     // Under Doer's process adapter: take the request id from the Doer run, honor Doer's stop signal, and log
-    // integration events to stderr (Doer keeps stdout and stderr as the run log). Standalone is unchanged.
+    // integration events to stderr (Doer keeps stdout and stderr as the run log).
     const doer = doerConfig();
     const controller = new AbortController();
     if (doer) process.once("SIGTERM", () => controller.abort(new Error("Run cancelled by Doer")));
@@ -71,7 +72,11 @@ async function main() {
     }
     const requestId = sessionIndex === 1 ? undefined : args[1];
     const result = await runAgent({ home, prompt: args[0], requestId: requestId || (doer ? undefined : randomUUID()), session, resumeOnly: command === "resume" },
-      doer ? event => { if (event.type === "doer") console.error(`[doer] ${JSON.stringify(event)}`); } : undefined, undefined, doer ? controller.signal : undefined);
+      event => {
+        if (doer && event.type === "doer") console.error(`[doer] ${JSON.stringify(event)}`);
+        const progress = providerProgressText(event);
+        if (progress) console.error(progress);
+      }, undefined, doer ? controller.signal : undefined);
     console.log(result.summary);
   }
 }

@@ -4,6 +4,10 @@ import { emitKeypressEvents } from 'node:readline';
 import { stripVTControlCharacters } from 'node:util';
 
 export const clean = (value: unknown) => stripVTControlCharacters(String(value)).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+export function providerProgressText(event: Record<string, unknown>): string | undefined {
+  if (event.type === 'provider_wait') return `Waiting for ${clean(event.model)} · ${Math.floor(Number(event.elapsedMs) / 1000)}s`;
+  if (event.type === 'provider_retry') return `Retrying ${clean(event.model)} · attempt ${event.attempt} in ${Math.ceil(Number(event.delayMs) / 1000)}s`;
+}
 const chars = (s: string) => [...s];
 export const width = (s: string) => chars(stripVTControlCharacters(s)).length;
 export const clip = (s: string, max: number) => { const c = chars(s); return c.length <= max ? s : max < 1 ? '' : c.slice(0, max - 1).join('') + '…'; };

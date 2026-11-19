@@ -12,7 +12,7 @@ import { skillCatalog, readSkill } from "./skills.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { AssistantEntry, Harness, createRegistry, defineDoc, defineExtension, defineTool, section, type Submission, type SubmissionId, type ConversationId, type Cursor } from "@earendil-works/pi-durable";
+import { AssistantEntry, Harness, createRegistry, defineDoc, defineExtension, defineTool, section, type Conversation, type LiveState, type Submission, type SubmissionId, type ConversationId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
@@ -287,8 +287,53 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       })().catch(error => emit({ type: "error", message: String(error) }));
     };
     runSignal.addEventListener("abort", abortHandler, { once: true });
-    const settle = async (submission: Submission) => {
-      const result = await submission.wait(context);
+    const settle = async (submission: Submission, conversation: Conversation) => {
+      const watch = await conversation.watch(context, { min: 1, max: 2 });
+      let waitingSince: number | undefined;
+      let nextNoticeMs = 5_000;
+      let lastRetry: string | undefined;
+      const observe = (value: typeof watch.value) => {
+        if (runSignal.aborted) return;
+        const live = value.docs["pi.live"] as LiveState | undefined;
+        const generation = live?.run?.inputs.includes(submission.id) ? live.generation : undefined;
+        if (!generation || generation.retry || generation.message) waitingSince = undefined;
+        else if (waitingSince === undefined) {
+          waitingSince = performance.now();
+          nextNoticeMs = 5_000;
+        }
+        if (generation?.retry) {
+          const retryKey = `${live?.run?.taskId}:${generation.attempt}:${generation.retry.at}`;
+          if (retryKey === lastRetry) return;
+          lastRetry = retryKey;
+          emit({ type: "provider_retry", model: selected, attempt: generation.attempt + 1,
+            delayMs: Math.max(0, generation.retry.at - Date.now()) });
+        }
+      };
+      const timer = setInterval(() => {
+        if (waitingSince === undefined || runSignal.aborted) return;
+        const elapsedMs = Math.floor(performance.now() - waitingSince);
+        if (elapsedMs < nextNoticeMs) return;
+        nextNoticeMs = elapsedMs + 10_000;
+        emit({ type: "provider_wait", model: selected, elapsedMs });
+      }, 1_000).unref();
+      let stopped: ReturnType<typeof watch.stop> | undefined;
+      const stop = () => {
+        clearInterval(timer);
+        return stopped ??= watch.stop();
+      };
+      const stopOnAbort = () => { void stop(); };
+      runSignal.addEventListener("abort", stopOnAbort, { once: true });
+      let result: Awaited<ReturnType<Submission["wait"]>>;
+      try {
+        if (!runSignal.aborted) {
+          watch.start(async call => { if (call.kind === "value") observe(call.value); });
+          observe(watch.value);
+        }
+        result = await submission.wait(context);
+      } finally {
+        runSignal.removeEventListener("abort", stopOnAbort);
+        await stop();
+      }
       if (result.status !== "done" || result.type !== "input") {
         await runtime.commit(async tx => { (await tx.doc(State)).pending = null; }, context);
         throw new Error(runFailureMessage(result, selected));
@@ -332,7 +377,8 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       if (pending.memory !== "@agent-memory" && pending.memory !== memory) throw new Error("Unfinished work uses a different memory binding. Restore the original binding to resume.");
       conversationId = pending.conversation;
       const pendingConversation = await runtime.conversation(pending.conversation, context);
-      await pendingConversation?.configure({ cwd, maxTurns: settings.maxTurns, instructions: `${manifest.instructions}\n${input.instructions || ""}`, tools: allowedTools }, context);
+      if (!pendingConversation) throw new Error("Pending conversation is missing");
+      await pendingConversation.configure({ cwd, maxTurns: settings.maxTurns, instructions: `${manifest.instructions}\n${input.instructions || ""}`, tools: allowedTools }, context);
       emit({ type: "recovery", requestId: pending.requestId });
       // Restore task attribution, but use the current worker's fresh credentials.
       const keys: readonly string[] = DOER_RESTORED_ENV;
@@ -341,7 +387,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       try { const pendingSubmission = await runtime.submission(pending.submission, context);
         if (!pendingSubmission) throw new Error("Pending submission is missing");
         if (pending.prompt) recordRecall(home,pending.requestId,String(pending.conversation),'user',pending.prompt);
-        summary = await settle(pendingSubmission);
+        summary = await settle(pendingSubmission, pendingConversation);
         recordRecall(home,pending.requestId,String(pending.conversation),'assistant',summary); }
       finally { for (const key of keys) { if (saved[key] !== undefined) process.env[key] = saved[key]; else delete process.env[key]; } }
       await runtime.commit(async tx => { (await tx.doc(State)).pending = null; }, context);
@@ -387,7 +433,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       if (runSignal.aborted) abortHandler();
       const handle = await runtime.submission(submission, context);
       if (!handle) throw new Error("Submission missing after commit");
-      summary = await settle(handle);
+      summary = await settle(handle, conversation);
       recordRecall(home,requestId,String(conversationId),'assistant',summary);
       await runtime.commit(async tx => { (await tx.doc(State)).pending = null; }, context);
     }
