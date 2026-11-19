@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { emitKeypressEvents } from 'node:readline';
 import { readManifest, initHome, lockHome } from './home.js';
-import { compactSession, listSessions, runAgent, type Emit } from './harness.js';
+import { compactSession, forkSession, listSessions, runAgent, type Emit } from './harness.js';
 import { readApp, saveApp, readSettings, saveSettings, listAgents, atomicJson, configRoot, type AgentSettings, type Connection } from './settings.js';
 import { inspectSkills, readSkill } from './skills.js';
 import { readActions } from './activity.js';
@@ -48,6 +48,7 @@ const commandList: Command[] = [
   { name: '/actions', description: 'Recent tool outcomes' },
   { name: '/sessions', description: 'List conversations with completed turns' },
   { name: '/session', description: 'Use a conversation by ID, or default' },
+  { name: '/fork', description: 'Start a new conversation from completed turn N' },
   { name: '/resume', description: 'Recover unfinished work' },
   { name: '/clear', description: 'Clear screen' },
   { name: '/exit', description: 'Leave harness' },
@@ -561,6 +562,11 @@ export async function chat(initialHome: string) {
             session = arg;
             line(`Using conversation ${session}.`);
           }
+        }
+        else if (cmd === '/fork') {
+          if (!/^\d+$/.test(arg)) throw new Error('Usage: /fork N (a positive completed turn number)');
+          session = await forkSession(home, session, Number(arg));
+          line(`Forked conversation ${session}.`);
         }
         else if (cmd === '/resume') await run('',true);
         else if (cmd === '/clear') { if (process.stdout.isTTY) console.clear(); status(); }

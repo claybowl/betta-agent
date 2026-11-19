@@ -86,6 +86,7 @@ Type `/` and the palette appears under the prompt. Keep typing to filter, Tab to
 | `/agents` · `/agent NAME` · `/new` | Switch agents or create one |
 | `/skills` · `/skill NAME` · `/use NAME TASK` | Browse skills, read one, or ask the agent to use one |
 | `/sessions` · `/session ID` | List and continue conversations with completed turns in this working directory |
+| `/fork N` | Start and select a new conversation through completed turn N |
 | `/memory` | Inspect, search and sync memory |
 | `/reflect` | Have the agent propose what it should remember |
 | `/permissions` | Shell, file writes, MCP tools |
@@ -100,6 +101,8 @@ Type `/` and the palette appears under the prompt. Keep typing to filter, Tab to
 | `/clear` · `/exit` | Clear the screen, leave |
 
 Use `/session default` to return to the default conversation. To continue from a script, list IDs with `betta-agents sessions HOME` and pass one to `betta-agents run HOME PROMPT --session ID`. The `/resume` command still recovers interrupted work.
+
+`/fork N` counts completed user turns from one in the selected conversation, including inherited turns. The fork includes the selected turn's assistant answer. Both conversations are available in `/sessions` immediately, and each continues independently.
 
 `/compact` runs on demand even when automatic compaction is off. It keeps the conversation selected and leaves original messages available to recall.
 

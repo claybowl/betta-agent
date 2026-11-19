@@ -12,7 +12,7 @@ import { skillCatalog, readSkill } from "./skills.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { AssistantEntry, Harness, createRegistry, defineDoc, defineExtension, defineTool, section, type Conversation, type LiveState, type Submission, type SubmissionId, type ConversationId, type Cursor } from "@earendil-works/pi-durable";
+import { AssistantEntry, Harness, createRegistry, defineDoc, defineExtension, defineTool, section, type Conversation, type LiveState, type Submission, type SubmissionId, type ConversationId, type Cursor, type EntryId, type Storage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
@@ -102,6 +102,31 @@ async function sessionInWorkspace(runtime: Harness, conversations: Record<string
   if (conversations[workspaceKey(home, cwd)] === id || (await conversation.agent(context)).cwd === cwd) return conversation;
   return undefined;
 }
+async function* completedAnswers(storage: Storage, id: ConversationId, order: 'ascending' | 'descending') {
+  // Submissions belong to their original conversation. Follow the fork edges
+  // to include inherited answers, stopping at each branch's inclusive cutoff.
+  const lineage: { id: ConversationId; through?: EntryId }[] = [];
+  let through: EntryId | undefined;
+  let record = await storage.conversation(id, context);
+  while (record) {
+    lineage.push({ id: record.id, through });
+    if (!record.parent) break;
+    if (through === undefined || record.parent.at < through) through = record.parent.at;
+    record = await storage.conversation(record.parent.conversationId, context);
+  }
+  if (order === 'ascending') lineage.reverse();
+  for (const source of lineage) {
+    let cursor: Cursor | undefined;
+    do {
+      const page = await storage.scanSubmissions({ conversationId: source.id, status: 'done', order }, 32, cursor, context);
+      for (const submission of page.items) {
+        if (submission.type === 'input' && submission.status === 'done'
+          && (source.through === undefined || submission.answer <= source.through)) yield submission.answer;
+      }
+      cursor = page.next;
+    } while (cursor);
+  }
+}
 export async function listSessions(inputHome: string) {
   const home = await fs.realpath(inputHome);
   const manifest = await readManifest(home);
@@ -120,24 +145,61 @@ export async function listSessions(inputHome: string) {
       const sessions: { id: string; lastCompletedAt: string | null; answerId: number }[] = [];
       for (const id of Object.values(state.conversations)) {
         if (!await sessionInWorkspace(runtime, state.conversations, id, home, cwd)) continue;
-        let cursor: Cursor | undefined;
-        do {
-          const page = await storage.scanSubmissions({ conversationId: id, status: 'done', order: 'descending' }, 32, cursor, context);
-          const submission = page.items.find(item => item.type === 'input' && item.status === 'done');
-          if (submission) {
-            const answer = await storage.entry(id, submission.answer, context);
-            const timestamp = answer?.entry.model?.at(-1)?.timestamp;
-            sessions.push({
-              id: `${manifest.id}:${id}`,
-              lastCompletedAt: timestamp === undefined ? null : new Date(timestamp).toISOString(),
-              answerId: submission.answer,
-            });
-            break;
-          }
-          cursor = page.next;
-        } while (cursor);
+        for await (const answerId of completedAnswers(storage, id, 'descending')) {
+          const answer = await storage.entry(id, answerId, context);
+          const timestamp = answer?.entry.model?.at(-1)?.timestamp;
+          sessions.push({
+            id: `${manifest.id}:${id}`,
+            lastCompletedAt: timestamp === undefined ? null : new Date(timestamp).toISOString(),
+            answerId,
+          });
+          break;
+        }
       }
       return sessions.sort((a, b) => b.answerId - a.answerId).map(({ id, lastCompletedAt }) => ({ id, lastCompletedAt }));
+    } finally {
+      await runtime.close(context);
+    }
+  } finally {
+    release();
+  }
+}
+export async function forkSession(inputHome: string, session: string | undefined, turn: number) {
+  if (!Number.isSafeInteger(turn) || turn < 1) throw new Error('Usage: /fork N (a positive completed turn number)');
+  const home = await fs.realpath(inputHome);
+  const manifest = await readManifest(home);
+  const settings = await readSettings(home);
+  const cwd = await fs.realpath(settings.cwd || home);
+  const release = await lockHome(home);
+  const noTurn = `No completed turn ${turn} in the selected conversation.`;
+  try {
+    const file = path.join(home, 'state', 'runtime.sqlite');
+    try { await fs.access(file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(noTurn); throw error; }
+    const storage = await openNodeSqliteStorage(file);
+    const runtime = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, context);
+    try {
+      const state = await runtime.snapshot(State, context);
+      if (state?.pending) throw new Error('Use /resume to finish interrupted work before forking.');
+      if (!state) throw new Error(noTurn);
+      const id = session
+        ? Object.values(state.conversations).find(id => session === `${manifest.id}:${id}`)
+        : state.conversations[workspaceKey(home, cwd)];
+      const conversation = id === undefined ? undefined : await sessionInWorkspace(runtime, state.conversations, id, home, cwd);
+      if (id === undefined || !conversation) throw new Error(noTurn);
+      let index = 0;
+      for await (const answer of completedAnswers(storage, id, 'ascending')) {
+        if (++index !== turn) continue;
+        const fork = await conversation.fork(answer, {
+          ownership: { kind: 'ownerless' },
+          agent: { cwd },
+          init: async (tx, id) => {
+            (await tx.doc(State)).conversations[`fork:${id}`] = id;
+          },
+        }, context);
+        return `${manifest.id}:${fork.id}`;
+      }
+      throw new Error(noTurn);
     } finally {
       await runtime.close(context);
     }

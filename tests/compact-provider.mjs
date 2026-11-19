@@ -20,7 +20,8 @@ globalThis.fetch = async (input, init) => {
   const delta = recall
     ? { tool_calls: [{ index: 0, id: 'recall_fixture', type: 'function',
       function: { name: 'recall_search', arguments: '{"query":"lantern atlas sentinel"}' } }] }
-    : { content: summary ? 'The conversation discussed a repeated inventory.' : 'Fixture reply.' };
+    : { content: summary ? 'The conversation discussed a repeated inventory.'
+      : process.env.FORK_FIXTURE === '1' ? `Answer to ${last.content}` : 'Fixture reply.' };
   const chunk = (delta, finish_reason) => 'data: ' + JSON.stringify({
     id: 'fixture', object: 'chat.completion.chunk', model: 'test',
     choices: [{ index: 0, delta, finish_reason }],
