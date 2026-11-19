@@ -123,10 +123,10 @@ for (const command of ['resume', 'run']) {
      assert.equal(readRecoveryStatus(), JSON.stringify({ pendingRequestId }) + '\n');
    };
    const idleStatus = { pendingRequestId: null, conversationId: null, model: null };
-   const checkChatRecoveryStatus = (message, attempts) => {
+   const checkChatRecoveryStatus = (message, attempts, flag = '') => {
      const result = spawnSync(process.execPath, ['--import', provider, cli, 'chat', dir], {
        env: { ...env, BETTA_TEST_NO_PROVIDER: '1' },
-       input: '/recovery-status\n'.repeat(attempts) + '/exit\n',
+       input: `/recovery-status${flag ? ' ' + flag : ''}\n`.repeat(attempts) + '/exit\n',
        encoding: 'utf8', timeout: 5_000,
      });
      assert.equal(result.status, 0, result.error?.message ?? result.stderr);
@@ -152,6 +152,7 @@ for (const command of ['resume', 'run']) {
      const { conversationId } = JSON.parse(verbose);
      assert.ok(Number.isSafeInteger(conversationId) && conversationId > 0);
      assert.deepEqual(JSON.parse(verbose), { pendingRequestId: 'crash-proof', conversationId, model: 'ollama/test' });
+     checkChatRecoveryStatus(`Interrupted request: crash-proof | Conversation ID: ${conversationId} | Model: ollama/test`, 2, '--verbose');
      assert.equal(readRecoveryStatus('--verbose'), verbose);
    }
    const args = command === 'run' ? ['Remember the blue boat.', 'crash-proof'] : [];
@@ -177,6 +178,7 @@ for (const command of ['resume', 'run']) {
      checkRecoveryStatus(null);
      assert.deepEqual(JSON.parse(readRecoveryStatus('--verbose')), idleStatus);
      checkChatRecoveryStatus('No interrupted work.', 1);
+     checkChatRecoveryStatus('No interrupted work.', 1, '--verbose');
    }
 
    const fresh = spawnSync(process.execPath, ['--import', provider, cli, 'run', dir, 'Fresh prompt'], {

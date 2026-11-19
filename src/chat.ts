@@ -49,7 +49,7 @@ const commandList: Command[] = [
   { name: '/sessions', description: 'List conversations with completed turns' },
   { name: '/session', description: 'Use a conversation by ID, or default' },
   { name: '/fork', description: 'Start a new conversation from completed turn N' },
-  { name: '/recovery-status', description: 'Check for interrupted work' },
+  { name: '/recovery-status', description: 'Check for interrupted work (add --verbose for conversation and model)' },
   { name: '/resume', description: 'Recover unfinished work' },
   { name: '/clear', description: 'Clear screen' },
   { name: '/exit', description: 'Leave harness' },
@@ -571,8 +571,13 @@ export async function chat(initialHome: string) {
           line(`Forked conversation ${session}.`);
         }
         else if (cmd === '/recovery-status') {
-          const { pendingRequestId } = await recoveryStatus(home);
-          line(pendingRequestId === null ? 'No interrupted work.' : `Interrupted request: ${pendingRequestId}`);
+          const verbose = arg === '--verbose';
+          const { pendingRequestId, conversationId, model } = await recoveryStatus(home, verbose);
+          if (pendingRequestId === null) line('No interrupted work.');
+          else {
+            const request = `Interrupted request: ${pendingRequestId}`;
+            line(verbose ? `${request} | Conversation ID: ${conversationId} | Model: ${model}` : request);
+          }
         }
         else if (cmd === '/resume') await run('',true);
         else if (cmd === '/clear') { if (process.stdout.isTTY) console.clear(); status(); }
