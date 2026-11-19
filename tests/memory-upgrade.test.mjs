@@ -98,7 +98,19 @@ test('reflection lists saved proposals across processes and reaches older uncons
     await assertPreviewReadOnly();
   }
 
-  assert.match(chat(`/reflect apply ${proposal.id}`), /"status": "applied"/);
+  const apply = () => JSON.parse(successfulOutput(runCli('reflect', ['--apply', id])));
+  const applied = apply();
+  assert.equal(applied.id, id);
+  assert.equal(applied.status, 'applied');
+  assert.deepEqual(list(), [applied]);
+  const memoryRoot = path.join(dir, 'memory');
+  assert.equal((await committedFiles(memoryRoot)).get('notebooks.md'), sentinel);
+  const appliedState = await readReflectionState();
+  assert.deepEqual(JSON.parse(appliedState[1]), [...consumed, sourceId]);
+  const appliedHead = await head(memoryRoot);
+  assert.deepEqual(apply(), applied);
+  assert.deepEqual(await readReflectionState(), appliedState);
+  assert.equal(await head(memoryRoot), appliedHead);
   assert.match(chat('/reflect'), /No unconsumed conversation evidence\./);
   assert.equal(await fs.readFile(requestsPath, 'utf8'), requests);
 });
@@ -142,7 +154,7 @@ test('reflect status in chat and standalone counts evidence without changing sta
   const typo = runCli('reflect', ['--stats']);
   assert.equal(typo.status, 1, typo.error?.message ?? typo.stderr);
   assert.match(typo.stderr, /Unknown reflection argument "--stats"/);
-  assert.match(typo.stderr, /reflect HOME \[--apply \| --status \| --list \| --preview ID\]/);
+  assert.match(typo.stderr, /reflect HOME \[--apply \[ID\] \| --status \| --list \| --preview ID\]/);
   await assertReadOnly();
 
   for (let i = 0; i < 2; i++) {

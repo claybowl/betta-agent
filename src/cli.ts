@@ -10,7 +10,7 @@ import { initHome, readManifest, exportHome } from "./home.js";
 import { listSessions, runAgent, type RunInput } from "./harness.js";
 import { doerConfig } from "./doer.js";
 const [command, homeArg, ...args] = process.argv.slice(2);
-const reflectionUsage = "reflect HOME [--apply | --status | --list | --preview ID]";
+const reflectionUsage = "reflect HOME [--apply [ID] | --status | --list | --preview ID]";
 async function main() {
   if (command === "doer-worker" && homeArg === "--protocol") {
     console.log("betta-doer/1");
@@ -48,6 +48,16 @@ async function main() {
         throw new Error(`--preview requires exactly one proposal ID. Usage: ${reflectionUsage}`);
       }
       console.log(JSON.stringify(await previewReflection(home, id), null, 2));
+      return;
+    }
+    const [flag, id] = args;
+    if (flag === "--apply" && id !== undefined && !id.startsWith("-")) {
+      const conflict = args.find(arg => arg === "--status" || arg === "--list");
+      if (conflict) throw new Error(`Cannot combine ${conflict} and --apply.`);
+      if (args.length !== 2 || !id.trim()) {
+        throw new Error(`--apply accepts at most one proposal ID. Usage: ${reflectionUsage}`);
+      }
+      console.log(JSON.stringify(await applyReflection(home, id), null, 2));
       return;
     }
     const unknownArgument = args.find(arg => arg !== "--apply" && arg !== "--status" && arg !== "--list");
