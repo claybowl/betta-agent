@@ -33,7 +33,7 @@ test('reflection lists saved proposals across processes and reaches older uncons
   const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
   const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
   const requestsPath = path.join(dir, 'requests.jsonl');
-  const response = JSON.stringify({
+  let response = JSON.stringify({
     summary: 'Notebook preference',
     changes: [{ path: 'notebooks.md', content: sentinel, sourceIds: [sourceId] }],
   });
@@ -113,6 +113,35 @@ test('reflection lists saved proposals across processes and reaches older uncons
   assert.equal(await head(memoryRoot), appliedHead);
   assert.match(chat('/reflect'), /No unconsumed conversation evidence\./);
   assert.equal(await fs.readFile(requestsPath, 'utf8'), requests);
+
+  recordRecall(dir, 'new', 'main', 'user', 'Prefer blue folders.');
+  response = JSON.stringify({
+    summary: 'Folder preference',
+    changes: [{ path: 'folders.md', content: 'Prefer blue folders.', sourceIds: ['new:user'] }],
+  });
+  assert.match(chat('/reflect'), /"status": "ready"/);
+  const ready = list().find(item => item.status === 'ready');
+  assert.ok(ready);
+  const requestsBeforeDiscard = await fs.readFile(requestsPath);
+  const stateBeforeDiscard = await readReflectionState();
+  for (const [args, error] of [
+    [['--discard', ready.id, '--apply'], /--discard and --apply/],
+    [['--discard'], /requires exactly one proposal ID/],
+    [['--discard', ready.id, 'extra-id'], /requires exactly one proposal ID/],
+  ]) {
+    const result = runCli('reflect', args);
+    assert.equal(result.status, 1, result.error?.message ?? result.stderr);
+    assert.match(result.stderr, error);
+  }
+  assert.deepEqual(await readReflectionState(), stateBeforeDiscard);
+  const discarded = JSON.parse(successfulOutput(runCli('reflect', ['--discard', ready.id])));
+  assert.equal(discarded.id, ready.id);
+  assert.equal(discarded.status, 'failed');
+  assert.equal(discarded.error, 'Discarded by user; evidence remains unconsumed');
+  assert.deepEqual(list().find(item => item.id === ready.id), discarded);
+  assert.equal(await head(memoryRoot), appliedHead);
+  assert.deepEqual((await readReflectionState())[1], stateBeforeDiscard[1]);
+  assert.deepEqual(await fs.readFile(requestsPath), requestsBeforeDiscard);
 });
 test('reflect status in chat and standalone counts evidence without changing state or calling the provider', async t => {
   const dir = await home(t, 'ollama/test');
@@ -154,7 +183,7 @@ test('reflect status in chat and standalone counts evidence without changing sta
   const typo = runCli('reflect', ['--stats']);
   assert.equal(typo.status, 1, typo.error?.message ?? typo.stderr);
   assert.match(typo.stderr, /Unknown reflection argument "--stats"/);
-  assert.match(typo.stderr, /reflect HOME \[--apply \[ID\] \| --status \| --list \| --preview ID\]/);
+  assert.match(typo.stderr, /reflect HOME \[--apply \[ID\] \| --status \| --list \| --preview ID \| --discard ID\]/);
   await assertReadOnly();
 
   for (let i = 0; i < 2; i++) {
