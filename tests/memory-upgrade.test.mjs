@@ -135,11 +135,19 @@ test('reflection lists saved proposals across processes and reaches older uncons
     assert.match(result.stderr, error);
   }
   assert.deepEqual(await readReflectionState(), stateBeforeDiscard);
-  const discarded = JSON.parse(successfulOutput(runCli('reflect', ['--discard', ready.id])));
+  for (const command of [`/reflect discard ${ready.id} extra-id`, '/reflect discard']) {
+    assert.match(chat(command), /Usage: \/reflect discard ID/);
+  }
+  const previewAfterInvalidDiscard = JSON.parse(successfulOutput(runCli('reflect', ['--preview', ready.id])));
+  assert.equal(previewAfterInvalidDiscard.status, 'ready');
+  assert.deepEqual(await readReflectionState(), stateBeforeDiscard);
+  assert.match(chat(`/reflect discard ${ready.id}`), /Discarded by user/);
+  const discarded = JSON.parse(successfulOutput(runCli('reflect', ['--preview', ready.id])));
   assert.equal(discarded.id, ready.id);
   assert.equal(discarded.status, 'failed');
   assert.equal(discarded.error, 'Discarded by user; evidence remains unconsumed');
-  assert.deepEqual(list().find(item => item.id === ready.id), discarded);
+  const { diff, ...savedProposal } = discarded;
+  assert.deepEqual(list().find(item => item.id === ready.id), savedProposal);
   assert.equal(await head(memoryRoot), appliedHead);
   assert.deepEqual((await readReflectionState())[1], stateBeforeDiscard[1]);
   assert.deepEqual(await fs.readFile(requestsPath), requestsBeforeDiscard);

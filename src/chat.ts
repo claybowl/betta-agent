@@ -521,13 +521,16 @@ export async function chat(initialHome: string) {
           if(parts.length) { const result=await memoryCommand(home,parts[0],parts.slice(1)); line(typeof result==='string'?result:JSON.stringify(result,null,2)); }
         }
         else if (cmd === '/reflect') {
-          const [action,id] = arg.split(/\s+/);
+          const [action,id,...extra] = arg.split(/\s+/);
           if(!action || action==='preview') await run('',false,async signal=>{const p=id?await previewReflection(home,id):await reflect(home,undefined,signal);return JSON.stringify(p.id==='none'?p:await previewReflection(home,p.id),null,2);});
           else if(action==='status') line(JSON.stringify(await reflectionStatus(home),null,2));
           else if(action==='list') line(JSON.stringify(await proposals(home),null,2));
           else if(action==='apply') line(JSON.stringify(await applyReflection(home,id),null,2));
           else if(action==='retry') await run('',false,async signal=>JSON.stringify(await retryReflection(home,id,signal),null,2));
-          else if(action==='discard') line(JSON.stringify(await discardReflection(home,id),null,2));
+          else if(action==='discard') {
+            if (!id || extra.length) { line('Usage: /reflect discard ID'); continue; }
+            line(JSON.stringify(await discardReflection(home,id),null,2));
+          }
           else if(action==='settings') {
             line(JSON.stringify(await reflectionSettings(home),null,2));
             const json=await ask('Reflection settings as JSON (Enter returns) > ');
