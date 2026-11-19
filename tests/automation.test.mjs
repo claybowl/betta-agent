@@ -57,10 +57,26 @@ test('bash defaults to a bounded timeout and says each call is a fresh shell', a
   assert.equal(seen[0].timeout, DEFAULT_BASH_TIMEOUT_SECONDS); assert.equal(seen[1].timeout, 900);
   assert.match(tool.description, /fresh shell/); assert.match(tool.description, /Stdin is closed/);
 });
-test('agents saved with the old 50-turn default move to the new default; other choices are kept', async t => {
-  const { initHome } = await import('../dist/home.js'); const { readSettings, saveSettings, DEFAULT_MAX_TURNS } = await import('../dist/settings.js');
+test('legacy 50-turn settings migrate once and a subsequently saved 50 survives', async t => {
+  const { initHome, lockHome } = await import('../dist/home.js');
+  const { readSettings, saveSettings, DEFAULT_MAX_TURNS } = await import('../dist/settings.js');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'betta-turns-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  await initHome(dir, 'T', 'faux/test'); const s = await readSettings(dir); assert.equal(s.maxTurns, DEFAULT_MAX_TURNS);
-  await fs.writeFile(path.join(dir, 'settings.json'), JSON.stringify({ ...s, maxTurns: 50 })); assert.equal((await readSettings(dir)).maxTurns, DEFAULT_MAX_TURNS);
-  s.maxTurns = 30; await saveSettings(dir, s); assert.equal((await readSettings(dir)).maxTurns, 30);
+  await initHome(dir, 'T', 'faux/test');
+  const defaults = await readSettings(dir);
+  assert.equal(defaults.maxTurns, DEFAULT_MAX_TURNS);
+  const file = path.join(dir, 'settings.json');
+  const legacy = { ...defaults, maxTurns: 50, maxTurnsMigrated: undefined, timeoutSeconds: 17 };
+  await fs.writeFile(file, JSON.stringify(legacy));
+  const release = await lockHome(dir);
+  try {
+    await assert.rejects(readSettings(dir), /busy/);
+    assert.equal(await fs.readFile(file, 'utf8'), JSON.stringify(legacy));
+  } finally { release(); }
+  const migrated = { ...legacy, maxTurns: DEFAULT_MAX_TURNS, maxTurnsMigrated: true };
+  assert.deepEqual(await readSettings(dir), migrated);
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), migrated);
+  await saveSettings(dir, legacy);
+  const chosen = { ...legacy, maxTurnsMigrated: true };
+  assert.deepEqual(await readSettings(dir), chosen);
+  assert.deepEqual(await readSettings(dir), chosen);
 });

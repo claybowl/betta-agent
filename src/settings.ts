@@ -10,6 +10,7 @@ export interface Connection {
 }
 export interface AgentSettings {
   version: 1; cwd?: string; maxTurns: number; compaction: boolean; timeoutSeconds: number;
+  maxTurnsMigrated?: true;
   permissions: { shell: boolean; files: boolean; mcp: boolean; network?: boolean; browser?: boolean; desktop?: boolean };
   connections: Connection[];
 }
@@ -53,8 +54,18 @@ export function validateSettings(s: AgentSettings): AgentSettings {
 }
 export async function readSettings(home: string): Promise<AgentSettings> {
   const manifest = await readManifest(home);
-  const saved = await json(path.join(home, 'settings.json')) as AgentSettings | undefined;
-  if (saved && saved.maxTurns === 50) saved.maxTurns = DEFAULT_MAX_TURNS;
+  const file = path.join(home, 'settings.json');
+  let saved = await json(file) as AgentSettings | undefined;
+  if (saved?.maxTurns === 50 && saved.maxTurnsMigrated !== true) {
+    const release = await lockHome(home);
+    try {
+      saved = await json(file) as AgentSettings | undefined;
+      if (saved?.maxTurns === 50 && saved.maxTurnsMigrated !== true) {
+        saved = validateSettings({ ...saved, maxTurns: DEFAULT_MAX_TURNS, maxTurnsMigrated: true });
+        await atomicJson(file, saved);
+      }
+    } finally { release(); }
+  }
   return validateSettings(saved ?? {
     version: 1, maxTurns: DEFAULT_MAX_TURNS, compaction: true, timeoutSeconds: 0,
     permissions: { shell: manifest.allowShell, files: manifest.allowShell, mcp: false, network: false }, connections: [],
@@ -63,7 +74,7 @@ export async function readSettings(home: string): Promise<AgentSettings> {
 export async function saveSettings(home: string, settings: AgentSettings) {
   validateSettings(settings);
   const release = await lockHome(home);
-  try { await atomicJson(path.join(home, 'settings.json'), settings); } finally { release(); }
+  try { await atomicJson(path.join(home, 'settings.json'), { ...settings, maxTurnsMigrated: true }); } finally { release(); }
 }
 export async function readApp(): Promise<AppSettings> {
   const s = await json(path.join(configRoot(), 'settings.json')) ?? { version: 1, theme: 'magic', banner: true, agentHomes: [], look: 2 };

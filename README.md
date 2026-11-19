@@ -108,6 +108,8 @@ Use `/session default` to return to the default conversation. To continue from a
 
 Set `NO_COLOR=1` for no colors, or `DONJON_NO_MOTION=1` to skip the startup animation.
 
+Older saved 50-turn limits migrate to 150 on first read. To use 50, set `maxTurns 50` in the Runtime section of `/settings`. The saved choice persists across restarts.
+
 ## Goal mode
 
 Give the agent an objective and let it run:

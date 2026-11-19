@@ -81,6 +81,28 @@ test('runtime timeout cancels work instead of queuing it for the next wake',asyn
  assert.equal((await runAgent({home:dir,resumeOnly:true},undefined,fake([]))).summary,'No unfinished work.');
 });
 
+test('chat /settings keeps a deliberate 50-turn limit after restart', async t => {
+  const dir = await home(t);
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const defaults = await readSettings(dir);
+  await fs.writeFile(path.join(dir, 'settings.json'), JSON.stringify({
+    ...defaults, maxTurns: 50, maxTurnsMigrated: undefined, timeoutSeconds: 17,
+  }));
+  const chat = input => {
+    const result = spawnSync(process.execPath, [cli, 'chat', dir], {
+      env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'), NO_COLOR: '1' },
+      input, encoding: 'utf8', timeout: 10_000,
+    });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+    return result.stdout;
+  };
+  const edited = chat('/settings\n2\nmaxTurns 50\n/settings\n2\n\n/exit\n');
+  assert.deepEqual(Array.from(edited.matchAll(/^maxTurns\s+(\d+)$/gm), match => match[1]), ['150', '50']);
+  const restarted = chat('/settings\n2\n\n/exit\n');
+  assert.match(restarted, /^maxTurns\s+50$/m);
+  assert.match(restarted, /^timeout\s+17s /m);
+});
+
 test('chat /compact reduces provider input after restart and preserves recall', async t => {
   const old = 'lantern atlas sentinel';
   const recent = 'The last shipment was cobalt.';
