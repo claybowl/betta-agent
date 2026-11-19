@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {spawn,spawnSync} from 'node:child_process';
+import {once} from 'node:events';
 import {fileURLToPath} from 'node:url';
 import {createModels} from '@earendil-works/pi-ai';
 import {fauxProvider,fauxAssistantMessage,fauxToolCall} from '@earendil-works/pi-ai/providers/faux';
@@ -200,6 +201,61 @@ test('standalone reflect retries a saved failure only when requested', async t =
     assert.deepEqual(await readState('reflection-consumed.json'), consumed);
     assert.equal(await readRequests(), requests);
   }
+});
+test('SIGINT cancels chat reflection retry at the provider and returns control to chat', async t => {
+  const dir = await home(t, 'ollama/test');
+  recordRecall(dir, 'retry', 'main', 'user', 'Prefer amber notebooks.');
+  const root = path.join(dir, 'memory');
+  await migrateMemory(dir);
+  const revision = await head(root);
+  await saveState(dir, 'reflection-consumed.json', []);
+  await saveState(dir, 'reflection-settings.json', { timeoutSeconds: 60 });
+
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const env = { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
+    COMPACT_REQUESTS: path.join(dir, 'requests.jsonl'), REFLECTION_FIXTURE_RESPONSE: 'invalid JSON', NO_COLOR: '1' };
+  const reflectCli = (...args) => spawnSync(process.execPath, ['--import', provider, cli, 'reflect', dir, ...args],
+    { env, encoding: 'utf8', timeout: 10_000 });
+  const list = () => {
+    const result = reflectCli('--list');
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const initial = reflectCli();
+  assert.equal(initial.status, 1, initial.error?.message ?? initial.stderr);
+  const [failed] = list();
+  assert.equal(failed.status, 'failed');
+  assert.deepEqual(failed.sourceIds, ['retry:user']);
+
+  const chat = spawn(process.execPath, ['--import', provider, cli, 'chat', dir], {
+    env: { ...env, REFLECTION_FIXTURE_HOLD: '1' },
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+  });
+  const closed = once(chat, 'close');
+  t.after(async () => { chat.kill('SIGKILL'); await closed; });
+  let stdout = '', stderr = '';
+  chat.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+  chat.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+  const nextProviderEvent = () => once(chat, 'message', { signal: AbortSignal.timeout(5_000) }).then(([message]) => message);
+  const received = nextProviderEvent();
+  chat.stdin.write(`/reflect retry ${failed.id}\n`);
+  assert.deepEqual(await received, { event: 'received' });
+  const aborted = nextProviderEvent();
+  assert.ok(chat.kill('SIGINT'));
+  assert.deepEqual(await aborted, { event: 'aborted', reason: 'Error: Stopped by user' });
+
+  const listingDeadline = once(chat, 'close', { signal: AbortSignal.timeout(5_000) });
+  chat.stdin.end('/reflect list\n/exit\n');
+  assert.deepEqual(await listingDeadline, [0, null], stderr);
+  const stopped = stdout.indexOf('Turn stopped.');
+  assert.ok(stopped >= 0, stdout);
+  const listing = JSON.parse(stdout.slice(stdout.indexOf('[', stopped)));
+  assert.equal(listing[0].id, failed.id);
+  assert.equal(listing[0].status, 'failed');
+  assert.deepEqual(list(), listing);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, 'state', 'reflection-consumed.json'), 'utf8')), []);
+  assert.equal(await head(root), revision);
 });
 test('reflect status in chat and standalone counts evidence without changing state or calling the provider', async t => {
   const dir = await home(t, 'ollama/test');

@@ -525,7 +525,7 @@ export async function chat(initialHome: string) {
           else if(action==='status') line(JSON.stringify(await reflectionStatus(home),null,2));
           else if(action==='list') line(JSON.stringify(await proposals(home),null,2));
           else if(action==='apply') line(JSON.stringify(await applyReflection(home,id),null,2));
-          else if(action==='retry') await run('',false,async()=>JSON.stringify(await retryReflection(home,id),null,2));
+          else if(action==='retry') await run('',false,async signal=>JSON.stringify(await retryReflection(home,id,signal),null,2));
           else if(action==='discard') line(JSON.stringify(await discardReflection(home,id),null,2));
           else if(action==='settings') {
             line(JSON.stringify(await reflectionSettings(home),null,2));

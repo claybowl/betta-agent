@@ -7,6 +7,15 @@ globalThis.fetch = async (input, init) => {
   }
   const body = await request.json();
   appendFileSync(process.env.COMPACT_REQUESTS, JSON.stringify(body) + '\n');
+  if (process.env.REFLECTION_FIXTURE_HOLD === '1') {
+    return new Promise((_, reject) => {
+      request.signal.addEventListener('abort', () => {
+        process.send({ event: 'aborted', reason: String(request.signal.reason) });
+        reject(request.signal.reason);
+      }, { once: true });
+      process.send({ event: 'received' });
+    });
+  }
   const system = body.messages.find(message => message.role === 'system')?.content ?? '';
   const last = body.messages.at(-1);
   const recall = last.content === 'Find the original message';

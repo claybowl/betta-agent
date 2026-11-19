@@ -134,6 +134,8 @@ Each agent's memory lives in `HOME/memory/` as Markdown files under their own Gi
 
 `/reflect status` shows how many messages in the next window of up to 200 unconsumed messages fit the configured character budget. It distinguishes an empty window from a first message that exceeds the budget. It leaves proposals and consumed evidence unchanged and makes no model call.
 
+Use `/reflect retry ID` to retry a failed or interrupted proposal. Press Esc or Ctrl-C during the retry to cancel it and return to chat.
+
 Full details — budgets, migration, recovery and sync — are in the [memory guide](MEMORY.md).
 
 ## Skills
