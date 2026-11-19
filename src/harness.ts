@@ -63,14 +63,34 @@ export async function makeModels(model: string, baseUrl?: string): Promise<Model
   return models;
 }
 
+export const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
+/** A command with no timeout could hold a turn forever; default it, and say that each call is a fresh shell. */
+export function boundedBash<T extends { description: string; execute: (args: any, ...rest: any[]) => any }>(tool: T): T {
+  return { ...tool,
+    description: `${tool.description} Defaults to ${DEFAULT_BASH_TIMEOUT_SECONDS} seconds when no timeout is given; pass a larger timeout for long builds or installs. Each call runs in a fresh shell in the working directory: cd and export do not carry over, so chain dependent steps with && in one command. Stdin is closed, so interactive prompts, editors and REPLs get no input; use non-interactive flags (git commit -m, npm init -y). Run servers in the background with & and stop them when done.`,
+    execute: (args: any, ...rest: any[]) => tool.execute({ ...args, timeout: args?.timeout ?? DEFAULT_BASH_TIMEOUT_SECONDS }, ...rest) };
+}
+/** Pulls the human message out of a provider error body such as `402 {"error":{"message":"Insufficient credits"}}`. */
+export function providerMessage(detail: string) {
+  const found: string[] = [];
+  const walk = (text: string, depth: number) => {
+    const start = text.indexOf("{"); if (start < 0 || depth > 3) return;
+    try { const v = JSON.parse(text.slice(start)); const m = v?.error?.message ?? v?.message ?? v?.detail;
+      if (typeof m === "string") { found.push(m); walk(m, depth + 1); } } catch { /* not JSON */ }
+  };
+  walk(detail, 0);
+  const msg = found.at(-1)?.split("\n")[0].trim();
+  const status = /^\s*(\d{3})\b/.exec(detail)?.[1] || [detail, ...found].map(t => /"code":\s*(\d{3})/.exec(t)?.[1]).find(Boolean);
+  return (msg ? `${status ? status + " " : ""}${msg}` : detail.slice(0, 300)).replace(/\.+$/, "");
+}
 /** One readable line for a run that did not answer; raw detail stays in the runtime log. */
 export function runFailureMessage(result: unknown, model: string) {
   const r = (result || {}) as { reason?: string; detail?: string; status?: string };
   const detail = String(r.detail || '');
   if (r.reason === "model_error" && /timed out|terminated|ETIMEDOUT|ECONNRESET/i.test(detail))
     return `${model} did not respond (${detail.replace(/\.$/, "")}). The provider may be down or overloaded; nothing was lost. Try again, or switch with /model.`;
-  if (r.reason === "model_error") return `${model} returned an error: ${detail || "no detail"}. Try again, or switch with /model.`;
-  if (r.reason === "turn_limit") return "Stopped at the turn limit. Raise it in /runtime or ask the agent to continue.";
+  if (r.reason === "model_error") return `${model} returned an error: ${providerMessage(detail) || "no detail"}. ${/\b(402|429)\b|credit|quota|limit/i.test(detail) ? "This is a billing or rate limit at the provider; add credit there or switch with /model." : "Try again, or switch with /model."}`;
+  if (r.reason === "turn_limit") return "Paused at the turn limit; the work so far is kept. Say \"continue\" to keep going, or raise maxTurns in /runtime.";
   return `Run did not complete (${r.reason || r.status || "unknown"}${detail ? ": " + detail : ""}).`;
 }
 function workspaceKey(home: string, cwd: string, name = 'main') {
@@ -213,7 +233,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
         return { output: [{ type: "text", text: skill.content }] };
       } });
     registry.install(defineExtension({ name: "agent-skills", sections: [section("skills", () => skillCatalog(home))], tools: [activity.wrap(skillTool)] }));
-    const coding = (CodingTools.tools || []).filter(t => t.name === "read" || (t.name === "bash" ? permissions.shell : permissions.files)).map(t => activity.wrap(t));
+    const coding = (CodingTools.tools || []).filter(t => t.name === "read" || (t.name === "bash" ? permissions.shell : permissions.files)).map(t => activity.wrap(t.name === "bash" ? boundedBash(t) : t));
     registry.install({ ...CodingTools, tools: coding });
     const mcpTools = connections.tools().map(t => activity.wrap(t));
     registry.install(defineExtension({ name: "mcp-connections", tools: mcpTools }));
