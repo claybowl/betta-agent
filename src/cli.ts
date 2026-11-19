@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { memoryCommand, importMemoryBundle } from "./memory-service.js";
-import { reflect, applyReflection, previewReflection, reflectionStatus } from "./reflection.js";
+import { reflect, applyReflection, previewReflection, proposals, reflectionStatus } from "./reflection.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -10,6 +10,7 @@ import { initHome, readManifest, exportHome } from "./home.js";
 import { listSessions, runAgent, type RunInput } from "./harness.js";
 import { doerConfig } from "./doer.js";
 const [command, homeArg, ...args] = process.argv.slice(2);
+const reflectionUsage = "reflect HOME [--apply | --status | --list]";
 async function main() {
   if (command === "doer-worker" && homeArg === "--protocol") {
     console.log("betta-doer/1");
@@ -32,16 +33,22 @@ async function main() {
     return;
   }
   if (!homeArg || !["init", "chat", "run", "sessions", "resume", "export", "inspect", "memory", "reflect", "memory-import"].includes(command || "")) {
-    console.log(`DIS Betta Agent Harness\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID] [--session ID]\nsessions HOME\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\nreflect HOME [--apply | --status]\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
+    console.log(`DIS Betta Agent Harness\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID] [--session ID]\nsessions HOME\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\n${reflectionUsage}\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
     return;
   }
   const home = path.resolve(homeArg);
   if (command === "memory") {
     const result=await memoryCommand(home,args[0]||'status',args.slice(1)); console.log(typeof result==='string'?result:JSON.stringify(result,null,2));
   } else if (command === "reflect") {
-    const unknownArgument = args.find(arg => arg !== "--apply" && arg !== "--status");
+    const unknownArgument = args.find(arg => arg !== "--apply" && arg !== "--status" && arg !== "--list");
     if (unknownArgument !== undefined) {
-      throw new Error(`Unknown reflection argument ${JSON.stringify(unknownArgument)}. Usage: reflect HOME [--apply | --status]`);
+      throw new Error(`Unknown reflection argument ${JSON.stringify(unknownArgument)}. Usage: ${reflectionUsage}`);
+    }
+    if (args.includes("--list")) {
+      if (args.includes("--apply")) throw new Error("Cannot combine --list and --apply.");
+      if (args.includes("--status")) throw new Error("Cannot combine --list and --status.");
+      console.log(JSON.stringify(await proposals(home), null, 2));
+      return;
     }
     if (args.includes("--status")) {
       if (args.includes("--apply")) throw new Error("Cannot combine --status and --apply.");

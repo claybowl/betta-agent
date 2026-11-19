@@ -17,7 +17,7 @@ import {listSkills,readSkill} from '../dist/skills.js';
 function fake(responses){const models=createModels(),faux=fauxProvider({models:[{id:'test'}]});models.setProvider(faux.provider);faux.setResponses(responses);return {models,faux};}
 async function home(t, model = 'faux/test'){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'donjon-memfs-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));await initHome(dir,'Test',model);return dir;}
 const change=(path,content,old)=>({path,content,expectedHash:old===undefined?'missing':digest(old)});
-test('chat /reflect reaches older unconsumed evidence and skips it after apply and restart', async t => {
+test('reflection lists saved proposals across processes and reaches older unconsumed evidence', async t => {
   const dir = await home(t, 'ollama/test');
   const sourceId = 'older:user';
   const sentinel = 'Prefer amber notebooks.';
@@ -37,15 +37,20 @@ test('chat /reflect reaches older unconsumed evidence and skips it after apply a
     summary: 'Notebook preference',
     changes: [{ path: 'notebooks.md', content: sentinel, sourceIds: [sourceId] }],
   });
-  const chat = command => {
-    const result = spawnSync(process.execPath, ['--import', provider, cli, 'chat', dir], {
-      input: `${command}\n/exit\n`, encoding: 'utf8', timeout: 20_000,
+  const runCli = (command, args, input) =>
+    spawnSync(process.execPath, ['--import', provider, cli, command, dir, ...args], {
+      input, encoding: 'utf8', timeout: 20_000,
       env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
         COMPACT_REQUESTS: requestsPath, REFLECTION_FIXTURE_RESPONSE: response, NO_COLOR: '1' },
     });
+  const successfulOutput = result => {
     assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
     return result.stdout;
   };
+  const chat = command => successfulOutput(runCli('chat', [], `${command}\n/exit\n`));
+  const list = () => JSON.parse(successfulOutput(runCli('reflect', ['--list'])));
+  assert.deepEqual(list(), []);
+  await assert.rejects(fs.stat(requestsPath), { code: 'ENOENT' });
   const output = chat('/reflect');
   assert.match(output, /"status": "ready"/);
   const [proposal] = await proposals(dir);
@@ -56,6 +61,18 @@ test('chat /reflect reaches older unconsumed evidence and skips it after apply a
   const request = JSON.parse(lines[0]);
   const { evidence } = JSON.parse(request.messages.at(-1).content);
   assert.deepEqual(evidence.map(({ id, text }) => ({ id, text })), [{ id: sourceId, text: sentinel }]);
+
+  const readReflectionState = () => Promise.all(['reflection-proposals.json', 'reflection-consumed.json']
+    .map(name => fs.readFile(path.join(dir, 'state', name))));
+  const stateBeforeListing = await readReflectionState();
+  assert.deepEqual(list(), [proposal]);
+  for (const flag of ['--apply', '--status']) {
+    const conflict = runCli('reflect', ['--list', flag]);
+    assert.equal(conflict.status, 1, conflict.error?.message ?? conflict.stderr);
+    assert.ok(conflict.stderr.includes(`--list and ${flag}`), conflict.stderr);
+  }
+  assert.deepEqual(await readReflectionState(), stateBeforeListing);
+  assert.equal(await fs.readFile(requestsPath, 'utf8'), requests);
 
   assert.match(chat(`/reflect apply ${proposal.id}`), /"status": "applied"/);
   assert.match(chat('/reflect'), /No unconsumed conversation evidence\./);
@@ -101,7 +118,7 @@ test('reflect status in chat and standalone counts evidence without changing sta
   const typo = runCli('reflect', ['--stats']);
   assert.equal(typo.status, 1, typo.error?.message ?? typo.stderr);
   assert.match(typo.stderr, /Unknown reflection argument "--stats"/);
-  assert.match(typo.stderr, /reflect HOME \[--apply \| --status\]/);
+  assert.match(typo.stderr, /reflect HOME \[--apply \| --status \| --list\]/);
   await assertReadOnly();
 
   for (let i = 0; i < 2; i++) {
