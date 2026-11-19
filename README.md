@@ -96,6 +96,7 @@ Type `/` and the palette appears under the prompt. Keep typing to filter, Tab to
 | `/compact` | Summarize older context in the selected conversation |
 | `/runtime` | Turn limit, compaction, timeout |
 | `/actions` | Recent tool calls and their outcomes |
+| `/recovery-status` | Show the pending request ID before deciding whether to resume |
 | `/resume` | Continue work interrupted by a crash |
 | `/settings` · `/theme` · `/app` | Settings, colors (`magic`, `purple`, `plain`), startup banner |
 | `/clear` · `/exit` | Clear the screen, leave |

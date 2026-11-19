@@ -119,6 +119,16 @@ for (const command of ['resume', 'run']) {
      assert.equal(result.status, 0, result.error?.message ?? result.stderr);
      assert.equal(result.stdout, JSON.stringify({ pendingRequestId }) + '\n');
    };
+   const checkChatRecoveryStatus = (message, attempts) => {
+     const result = spawnSync(process.execPath, ['--import', provider, cli, 'chat', dir], {
+       env: { ...env, BETTA_TEST_NO_PROVIDER: '1' },
+       input: '/recovery-status\n'.repeat(attempts) + '/exit\n',
+       encoding: 'utf8', timeout: 5_000,
+     });
+     assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+     assert.doesNotMatch(result.stdout + result.stderr, /Unexpected provider call during recovery-status/);
+     assert.equal(result.stdout.split('\n').filter(line => line.endsWith(message)).length, attempts, result.stdout);
+   };
    if (command === 'resume') {
      checkRecoveryStatus(null);
      await assert.rejects(fs.stat(path.join(dir, 'state', 'runtime.sqlite')), { code: 'ENOENT' });
@@ -130,6 +140,7 @@ for (const command of ['resume', 'run']) {
    assert.equal((await readMemory(path.join(dir, 'memory'), 'learned.md')).content, 'Remember the blue boat.\n');
 
    if (command === 'resume') {
+     checkChatRecoveryStatus('Interrupted request: crash-proof', 2);
      checkRecoveryStatus('crash-proof');
      checkRecoveryStatus('crash-proof');
    }
@@ -152,7 +163,10 @@ for (const command of ['resume', 'run']) {
    assert.equal(status, 0, `${command} exited with ${signal ?? status}. stderr: ${stderr}`);
    assert.equal(stderr.split('\n').filter(line => line.includes('Recovering interrupted run')).length, 1);
    assert.equal(stdout, 'Recovered and remembered.\n');
-   if (command === 'resume') checkRecoveryStatus(null);
+   if (command === 'resume') {
+     checkRecoveryStatus(null);
+     checkChatRecoveryStatus('No interrupted work.', 1);
+   }
 
    const fresh = spawnSync(process.execPath, ['--import', provider, cli, 'run', dir, 'Fresh prompt'], {
      env, input: '', encoding: 'utf8', timeout: 5_000,

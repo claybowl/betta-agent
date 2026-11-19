@@ -1,10 +1,11 @@
 import { once } from 'node:events';
 
-const release = once(process.stdin, 'end');
-process.stdin.resume();
+const noProvider = process.env.BETTA_TEST_NO_PROVIDER === '1';
+const release = noProvider ? undefined : once(process.stdin, 'end');
+if (!noProvider) process.stdin.resume();
 
 globalThis.fetch = async (input, init) => {
-  if (process.env.BETTA_TEST_NO_PROVIDER === '1') {
+  if (noProvider) {
     const message = 'Unexpected provider call during recovery-status';
     console.error(message);
     throw new Error(message);
