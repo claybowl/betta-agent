@@ -109,14 +109,30 @@ for (const command of ['resume', 'run']) {
    const manifest = await readManifest(dir);
    await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, model: 'ollama/test' }));
    const env = { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config') };
+   const provider = fileURLToPath(new URL('./resume-provider.mjs', import.meta.url));
+   const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+   const checkRecoveryStatus = pendingRequestId => {
+     const result = spawnSync(process.execPath, ['--import', provider, cli, 'recovery-status', dir], {
+       env: { ...env, BETTA_TEST_NO_PROVIDER: '1' }, input: '', encoding: 'utf8', timeout: 5_000,
+     });
+     assert.doesNotMatch(result.stderr, /Unexpected provider call during recovery-status/);
+     assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+     assert.equal(result.stdout, JSON.stringify({ pendingRequestId }) + '\n');
+   };
+   if (command === 'resume') {
+     checkRecoveryStatus(null);
+     await assert.rejects(fs.stat(path.join(dir, 'state', 'runtime.sqlite')), { code: 'ENOENT' });
+   }
    const crashed = spawnSync(process.execPath, [fixture, dir, 'crash', 'ollama'], {
      env, encoding: 'utf8', timeout: 10_000,
    });
    assert.equal(crashed.signal, 'SIGKILL', crashed.error?.message ?? crashed.stderr);
    assert.equal((await readMemory(path.join(dir, 'memory'), 'learned.md')).content, 'Remember the blue boat.\n');
 
-   const provider = fileURLToPath(new URL('./resume-provider.mjs', import.meta.url));
-   const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+   if (command === 'resume') {
+     checkRecoveryStatus('crash-proof');
+     checkRecoveryStatus('crash-proof');
+   }
    const args = command === 'run' ? ['Remember the blue boat.', 'crash-proof'] : [];
    const child = spawn(process.execPath, ['--import', provider, cli, command, dir, ...args], {
      env, timeout: 10_000, killSignal: 'SIGKILL',
@@ -136,6 +152,7 @@ for (const command of ['resume', 'run']) {
    assert.equal(status, 0, `${command} exited with ${signal ?? status}. stderr: ${stderr}`);
    assert.equal(stderr.split('\n').filter(line => line.includes('Recovering interrupted run')).length, 1);
    assert.equal(stdout, 'Recovered and remembered.\n');
+   if (command === 'resume') checkRecoveryStatus(null);
 
    const fresh = spawnSync(process.execPath, ['--import', provider, cli, 'run', dir, 'Fresh prompt'], {
      env, input: '', encoding: 'utf8', timeout: 5_000,

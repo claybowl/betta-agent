@@ -4,6 +4,11 @@ const release = once(process.stdin, 'end');
 process.stdin.resume();
 
 globalThis.fetch = async (input, init) => {
+  if (process.env.BETTA_TEST_NO_PROVIDER === '1') {
+    const message = 'Unexpected provider call during recovery-status';
+    console.error(message);
+    throw new Error(message);
+  }
   const request = new Request(input, init);
   if (request.url !== 'http://localhost:11434/v1/chat/completions') {
     throw new Error('Unexpected scripted provider URL: ' + request.url);

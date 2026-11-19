@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { chat } from "./chat.js";
 import { providerProgressText } from "./tui.js";
 import { initHome, readManifest, exportHome } from "./home.js";
-import { listSessions, runAgent, type RunInput } from "./harness.js";
+import { listSessions, recoveryStatus, runAgent, type RunInput } from "./harness.js";
 import { doerConfig } from "./doer.js";
 const [command, homeArg, ...args] = process.argv.slice(2);
 const reflectionUsage = "reflect HOME [--apply [ID] | --status | --list | --preview ID | --discard ID | --retry ID]";
@@ -38,8 +38,8 @@ async function main() {
     await runAgent(input, event => process.stdout.write(JSON.stringify(event) + "\n"), undefined, controller.signal);
     return;
   }
-  if (!homeArg || !["init", "chat", "run", "sessions", "resume", "export", "inspect", "memory", "reflect", "memory-import"].includes(command || "")) {
-    console.log(`DIS Betta Agent Harness\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID] [--session ID]\nsessions HOME\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\n${reflectionUsage}\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
+  if (!homeArg || !["init", "chat", "run", "sessions", "recovery-status", "resume", "export", "inspect", "memory", "reflect", "memory-import"].includes(command || "")) {
+    console.log(`DIS Betta Agent Harness\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID] [--session ID]\nsessions HOME\nrecovery-status HOME\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\n${reflectionUsage}\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
     return;
   }
   const home = path.resolve(homeArg);
@@ -106,6 +106,9 @@ async function main() {
     console.log(await fs.readFile(path.join(home, "memory", "MEMORY.md"), "utf8"));
   } else if (command === "sessions") {
     console.log(JSON.stringify(await listSessions(home), null, 2));
+  } else if (command === "recovery-status") {
+    if (args.length) throw new Error("Usage: recovery-status HOME");
+    console.log(JSON.stringify(await recoveryStatus(home)));
   } else if (command === "chat") {
     await chat(home);
   } else {

@@ -127,6 +127,30 @@ async function* completedAnswers(storage: Storage, id: ConversationId, order: 'a
     } while (cursor);
   }
 }
+export async function recoveryStatus(inputHome: string): Promise<{ pendingRequestId: string | null }> {
+  const home = await fs.realpath(inputHome);
+  await readManifest(home);
+  const release = await lockHome(home);
+  try {
+    const file = path.join(home, "state", "runtime.sqlite");
+    try { await fs.access(file); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { pendingRequestId: null };
+      throw error;
+    }
+    const runtime = await Harness.open(await openNodeSqliteStorage(file), {
+      models: createModels(), registry: createRegistry(), readOnly: true,
+    }, context);
+    try {
+      const state = await runtime.snapshot(State, context);
+      return { pendingRequestId: state?.pending?.requestId ?? null };
+    } finally {
+      await runtime.close(context);
+    }
+  } finally {
+    release();
+  }
+}
 export async function listSessions(inputHome: string) {
   const home = await fs.realpath(inputHome);
   const manifest = await readManifest(home);
