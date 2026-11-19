@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { emitKeypressEvents } from 'node:readline';
 import { readManifest, initHome, lockHome } from './home.js';
-import { runAgent, type Emit } from './harness.js';
+import { listSessions, runAgent, type Emit } from './harness.js';
 import { readApp, saveApp, readSettings, saveSettings, listAgents, atomicJson, configRoot, type AgentSettings, type Connection } from './settings.js';
 import { inspectSkills, readSkill } from './skills.js';
 import { readActions } from './activity.js';
@@ -45,6 +45,8 @@ const commandList: Command[] = [
   { name: '/theme', description: 'Magic City, purple or plain' },
   { name: '/app', description: 'Theme and startup banner' },
   { name: '/actions', description: 'Recent tool outcomes' },
+  { name: '/sessions', description: 'List conversations with completed turns' },
+  { name: '/session', description: 'Use a conversation by ID, or default' },
   { name: '/resume', description: 'Recover unfinished work' },
   { name: '/clear', description: 'Clear screen' },
   { name: '/exit', description: 'Leave harness' },
@@ -57,6 +59,7 @@ export async function chat(initialHome: string) {
   let manifest = await readManifest(home), settings = await readSettings(home);
   const connections = new Connections();
   let history: string[] = [], leaving = false;
+  let session: string | undefined;
   // Pickers, the command palette and the spinner need a real terminal on both ends; scripted chat keeps plain prompts.
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const paint = () => makeTheme(app.theme, Boolean(process.stdout.isTTY) && !process.env.NO_COLOR);
@@ -236,7 +239,7 @@ export async function chat(initialHome: string) {
     if (!answer) return;
     if (answer === 'home') delete settings.cwd;
     else { const dir = await fs.realpath(expand(answer)); if (!(await fs.stat(dir)).isDirectory()) throw new Error('Choose a directory'); settings.cwd = dir; }
-    await save(); line(`Working directory: ${settings.cwd || home}`);
+    await save(); session = undefined; line(`Working directory: ${settings.cwd || home}`);
   };
   const connectionMenu = async () => {
     panel('Connections');
@@ -300,7 +303,7 @@ export async function chat(initialHome: string) {
   };
   const activate = async (target: string) => {
     const nextHome = await fs.realpath(target), nextManifest = await readManifest(nextHome), nextSettings = await readSettings(nextHome);
-    await connections.close(); home = nextHome; manifest = nextManifest; settings = nextSettings; await remember();
+    await connections.close(); session = undefined; home = nextHome; manifest = nextManifest; settings = nextSettings; await remember();
     if (tty) console.log(); status(); await health();
   };
   const newAgent = async () => {
@@ -391,7 +394,7 @@ export async function chat(initialHome: string) {
     try {
       if (tty) spin.start(); else console.log(dim('Working… Esc to stop'));
       if (task) { const text = await task(controller.signal); spin.stop(); panel('Memory reflection'); line(text); return; }
-      const result = await runAgent({ home, prompt, requestId: randomUUID(), resumeOnly }, live, undefined, controller.signal, connections);
+      const result = await runAgent({ home, prompt, requestId: randomUUID(), resumeOnly, session }, live, undefined, controller.signal, connections);
       spin.stop(); panel(manifest.name); line(result.summary); console.log(dim(`${result.usage.inputTokens} in · ${result.usage.outputTokens} out · $${result.costUsd.toFixed(4)}`));
       return result;
     } catch (error) {
@@ -535,6 +538,20 @@ export async function chat(initialHome: string) {
         else if (cmd === '/skill') { if (arg) await showSkill(arg); else await skillsMenu(); }
         else if (cmd === '/use') { const i = arg.indexOf(' '); if (i < 1) throw new Error('Usage: /use NAME TASK — /skills lists the names'); const name = arg.slice(0,i); await readSkill(home,name); await run(`Use the installed skill ${JSON.stringify(name)}. First load its instructions with skill_read. Task: ${arg.slice(i+1)}`); }
         else if (cmd === '/actions') showActions();
+        else if (cmd === '/sessions') {
+          const sessions = await listSessions(home);
+          if (!sessions.length) line('No completed conversations in this working directory.');
+          for (const item of sessions) line(`${item.id}${item.lastCompletedAt ? '  ' + item.lastCompletedAt : ''}${item.id === session ? ' · selected' : ''}`);
+        }
+        else if (cmd === '/session') {
+          if (arg === 'default') { session = undefined; line('Using the default conversation.'); }
+          else {
+            if (!arg) throw new Error('Usage: /session ID or /session default. Use /sessions to list IDs.');
+            if (!(await listSessions(home)).some(item => item.id === arg)) throw new Error('Unknown session for this agent and working directory.');
+            session = arg;
+            line(`Using conversation ${session}.`);
+          }
+        }
         else if (cmd === '/resume') await run('',true);
         else if (cmd === '/clear') { if (process.stdout.isTTY) console.clear(); status(); }
         else if (cmd === '/settings') {

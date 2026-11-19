@@ -6,7 +6,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { chat } from "./chat.js";
 import { initHome, readManifest, exportHome } from "./home.js";
-import { runAgent, type RunInput } from "./harness.js";
+import { listSessions, runAgent, type RunInput } from "./harness.js";
 import { doerConfig } from "./doer.js";
 const [command, homeArg, ...args] = process.argv.slice(2);
 async function main() {
@@ -30,8 +30,8 @@ async function main() {
     await runAgent(input, event => process.stdout.write(JSON.stringify(event) + "\n"), undefined, controller.signal);
     return;
   }
-  if (!homeArg || !["init", "chat", "run", "resume", "export", "inspect", "memory", "reflect", "memory-import"].includes(command || "")) {
-    console.log(`DIS Betta Agent Harness\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID]\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\nreflect HOME [--apply]\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
+  if (!homeArg || !["init", "chat", "run", "sessions", "resume", "export", "inspect", "memory", "reflect", "memory-import"].includes(command || "")) {
+    console.log(`DIS Betta Agent Harness\n\ninit HOME NAME PROVIDER/MODEL\nchat HOME\nrun HOME PROMPT [REQUEST_ID] [--session ID]\nsessions HOME\nresume HOME\ninspect HOME\nexport HOME DESTINATION [--continuation] [--history]\nmemory HOME COMMAND [ARGS]\nreflect HOME [--apply]\nmemory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL\n\nSet provider API keys in your environment. Agent files contain no credentials.\nUse /settings and /permissions in chat to configure tools, connections, and runtime.`);
     return;
   }
   const home = path.resolve(homeArg);
@@ -54,6 +54,8 @@ async function main() {
   } else if (command === "inspect") {
     console.log(JSON.stringify(await readManifest(home), null, 2));
     console.log(await fs.readFile(path.join(home, "memory", "MEMORY.md"), "utf8"));
+  } else if (command === "sessions") {
+    console.log(JSON.stringify(await listSessions(home), null, 2));
   } else if (command === "chat") {
     await chat(home);
   } else {
@@ -62,7 +64,13 @@ async function main() {
     const doer = doerConfig();
     const controller = new AbortController();
     if (doer) process.once("SIGTERM", () => controller.abort(new Error("Run cancelled by Doer")));
-    const result = await runAgent({ home, prompt: args[0], requestId: args[1] || (doer ? undefined : randomUUID()), resumeOnly: command === "resume" },
+    const sessionIndex = args[1] === '--session' ? 1 : args[2] === '--session' ? 2 : -1;
+    const session = sessionIndex < 0 ? undefined : args[sessionIndex + 1];
+    if (sessionIndex >= 0 && (!session || args.length !== sessionIndex + 2 || command !== 'run')) {
+      throw new Error('Usage: run HOME PROMPT [REQUEST_ID] [--session ID]');
+    }
+    const requestId = sessionIndex === 1 ? undefined : args[1];
+    const result = await runAgent({ home, prompt: args[0], requestId: requestId || (doer ? undefined : randomUUID()), session, resumeOnly: command === "resume" },
       doer ? event => { if (event.type === "doer") console.error(`[doer] ${JSON.stringify(event)}`); } : undefined, undefined, doer ? controller.signal : undefined);
     console.log(result.summary);
   }

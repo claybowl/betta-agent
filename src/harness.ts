@@ -12,13 +12,13 @@ import { skillCatalog, readSkill } from "./skills.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { AssistantEntry, Harness, createRegistry, defineDoc, defineExtension, defineTool, section, type Submission, type SubmissionId, type ConversationId } from "@earendil-works/pi-durable";
+import { AssistantEntry, Harness, createRegistry, defineDoc, defineExtension, defineTool, section, type Submission, type SubmissionId, type ConversationId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import { createProvider, type Models } from "@earendil-works/pi-ai";
+import { createModels, createProvider, type Models } from "@earendil-works/pi-ai";
 import { appModels } from "./credentials.js";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { Type } from "typebox";
@@ -37,7 +37,7 @@ const State = defineDoc<{ conversations: Record<string, ConversationId>; pending
 });
 export interface RunInput {
   home: string; cwd?: string; memoryDir?: string; model?: string; baseUrl?: string;
-  prompt?: string; requestId?: string; sessionKey?: string; instructions?: string; resumeOnly?: boolean; costReporter?: "adapter"; allowShell?: boolean;
+  prompt?: string; requestId?: string; sessionKey?: string; session?: string; instructions?: string; resumeOnly?: boolean; costReporter?: "adapter"; allowShell?: boolean;
 }
 export interface RunResult {
   sessionId: string; requestId: string; summary: string; recovered: boolean;
@@ -72,6 +72,58 @@ export function runFailureMessage(result: unknown, model: string) {
   if (r.reason === "model_error") return `${model} returned an error: ${detail || "no detail"}. Try again, or switch with /model.`;
   if (r.reason === "turn_limit") return "Stopped at the turn limit. Raise it in /runtime or ask the agent to continue.";
   return `Run did not complete (${r.reason || r.status || "unknown"}${detail ? ": " + detail : ""}).`;
+}
+function workspaceKey(home: string, cwd: string, name = 'main') {
+  return hash(`${name}\n${cwd === home ? '@agent-home' : cwd}`);
+}
+async function sessionInWorkspace(runtime: Harness, conversations: Record<string, ConversationId>, id: ConversationId, home: string, cwd: string) {
+  const conversation = await runtime.conversation(id, context);
+  if (!conversation) return undefined;
+  if (conversations[workspaceKey(home, cwd)] === id || (await conversation.agent(context)).cwd === cwd) return conversation;
+  return undefined;
+}
+export async function listSessions(inputHome: string) {
+  const home = await fs.realpath(inputHome);
+  const manifest = await readManifest(home);
+  const settings = await readSettings(home);
+  const cwd = await fs.realpath(settings.cwd || home);
+  const release = await lockHome(home);
+  try {
+    const file = path.join(home, 'state', 'runtime.sqlite');
+    try { await fs.access(file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+    const storage = await openNodeSqliteStorage(file);
+    const runtime = await Harness.open(storage, { models: createModels(), registry: createRegistry(), readOnly: true }, context);
+    try {
+      const state = await runtime.snapshot(State, context);
+      if (!state) return [];
+      const sessions: { id: string; lastCompletedAt: string | null; answerId: number }[] = [];
+      for (const id of Object.values(state.conversations)) {
+        if (!await sessionInWorkspace(runtime, state.conversations, id, home, cwd)) continue;
+        let cursor: Cursor | undefined;
+        do {
+          const page = await storage.scanSubmissions({ conversationId: id, status: 'done', order: 'descending' }, 32, cursor, context);
+          const submission = page.items.find(item => item.type === 'input' && item.status === 'done');
+          if (submission) {
+            const answer = await storage.entry(id, submission.answer, context);
+            const timestamp = answer?.entry.model?.at(-1)?.timestamp;
+            sessions.push({
+              id: `${manifest.id}:${id}`,
+              lastCompletedAt: timestamp === undefined ? null : new Date(timestamp).toISOString(),
+              answerId: submission.answer,
+            });
+            break;
+          }
+          cursor = page.next;
+        } while (cursor);
+      }
+      return sessions.sort((a, b) => b.answerId - a.answerId).map(({ id, lastCompletedAt }) => ({ id, lastCompletedAt }));
+    } finally {
+      await runtime.close(context);
+    }
+  } finally {
+    release();
+  }
 }
 export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedModels?: Models, signal?: AbortSignal, suppliedConnections?: Connections): Promise<RunResult> {
   // Doer integration is on only when all four DOER_* variables are in the environment. Read before taking the lock.
@@ -234,6 +286,13 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     // Without a known run there is no stable id: the request still runs, but is not deduplicated.
     if (doerStart && !requestId && !input.resumeOnly) requestId = doerStart.runId || randomUUID();
     let conversationId: ConversationId | undefined;
+    const selectedSessionId = !input.resumeOnly && input.session
+      ? Object.values(state.conversations).find(id => input.session === `${manifest.id}:${id}`)
+      : undefined;
+    if (!input.resumeOnly && input.session && (selectedSessionId === undefined
+      || !await sessionInWorkspace(runtime, state.conversations, selectedSessionId, home, cwd))) {
+      throw new Error('Unknown session for this agent and working directory. List available sessions with the sessions command.');
+    }
     // A run Doer cancelled is not resumed. On Windows Doer's stop is a hard kill, indistinguishable from a crash locally.
     const cancelledRun = state.pending && doerClient && doerStart ? await cancelledRunFor(doerClient, doerStart, state.pending.env || {}) : undefined;
     if (state.pending && cancelledRun) {
@@ -277,9 +336,9 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       runSignal.throwIfAborted();
       currentRequestId = requestId;
       if (!input.prompt || !requestId) throw new Error("A prompt and stable requestId are required");
-      const key = hash(`${input.sessionKey || "main"}\n${cwd === home ? "@agent-home" : cwd}`);
-      conversationId = state.conversations[key];
-      if (!conversationId) {
+      const key = workspaceKey(home, cwd, input.sessionKey || 'main');
+      conversationId = selectedSessionId ?? state.conversations[key];
+      if (conversationId === undefined) {
         conversationId = await runtime.commit(async tx => {
           const doc = await tx.doc(State);
           const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });

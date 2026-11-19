@@ -85,6 +85,7 @@ Type `/` and the palette appears under the prompt. Keep typing to filter, Tab to
 | `/goal OBJECTIVE` | Keep working until done — see [Goal mode](#goal-mode) |
 | `/agents` · `/agent NAME` · `/new` | Switch agents or create one |
 | `/skills` · `/skill NAME` · `/use NAME TASK` | Browse skills, read one, or ask the agent to use one |
+| `/sessions` · `/session ID` | List and continue conversations with completed turns in this working directory |
 | `/memory` | Inspect, search and sync memory |
 | `/reflect` | Have the agent propose what it should remember |
 | `/permissions` | Shell, file writes, MCP tools |
@@ -96,6 +97,8 @@ Type `/` and the palette appears under the prompt. Keep typing to filter, Tab to
 | `/resume` | Continue work interrupted by a crash |
 | `/settings` · `/theme` · `/app` | Settings, colors (`magic`, `purple`, `plain`), startup banner |
 | `/clear` · `/exit` | Clear the screen, leave |
+
+Use `/session default` to return to the default conversation. To continue from a script, list IDs with `betta-agents sessions HOME` and pass one to `betta-agents run HOME PROMPT --session ID`. The `/resume` command still recovers interrupted work.
 
 Set `NO_COLOR=1` for no colors, or `DONJON_NO_MOTION=1` to skip the startup animation.
 
