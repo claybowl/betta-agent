@@ -15,8 +15,52 @@ import {reflect,proposals,applyReflection,discardReflection} from '../dist/refle
 import {runAgent} from '../dist/harness.js';
 import {listSkills,readSkill} from '../dist/skills.js';
 function fake(responses){const models=createModels(),faux=fauxProvider({models:[{id:'test'}]});models.setProvider(faux.provider);faux.setResponses(responses);return {models,faux};}
-async function home(t){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'donjon-memfs-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));await initHome(dir,'Test','faux/test');return dir;}
+async function home(t, model = 'faux/test'){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'donjon-memfs-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));await initHome(dir,'Test',model);return dir;}
 const change=(path,content,old)=>({path,content,expectedHash:old===undefined?'missing':digest(old)});
+test('chat /reflect reaches older unconsumed evidence and skips it after apply and restart', async t => {
+  const dir = await home(t, 'ollama/test');
+  const sourceId = 'older:user';
+  const sentinel = 'Prefer amber notebooks.';
+  recordRecall(dir, 'older', 'main', 'user', sentinel);
+  const consumed = [];
+  for (let i = 0; i < 200; i++) {
+    const requestId = `reviewed-${i}`;
+    recordRecall(dir, requestId, 'main', 'user', 'Previously reviewed evidence.');
+    consumed.push(`${requestId}:user`);
+  }
+  await saveState(dir, 'reflection-consumed.json', consumed);
+
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const requestsPath = path.join(dir, 'requests.jsonl');
+  const response = JSON.stringify({
+    summary: 'Notebook preference',
+    changes: [{ path: 'notebooks.md', content: sentinel, sourceIds: [sourceId] }],
+  });
+  const chat = command => {
+    const result = spawnSync(process.execPath, ['--import', provider, cli, 'chat', dir], {
+      input: `${command}\n/exit\n`, encoding: 'utf8', timeout: 20_000,
+      env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
+        COMPACT_REQUESTS: requestsPath, REFLECTION_FIXTURE_RESPONSE: response, NO_COLOR: '1' },
+    });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+    return result.stdout;
+  };
+  const output = chat('/reflect');
+  assert.match(output, /"status": "ready"/);
+  const [proposal] = await proposals(dir);
+  assert.deepEqual(proposal.sourceIds, [sourceId]);
+  const requests = await fs.readFile(requestsPath, 'utf8');
+  const lines = requests.trim().split('\n');
+  assert.equal(lines.length, 1);
+  const request = JSON.parse(lines[0]);
+  const { evidence } = JSON.parse(request.messages.at(-1).content);
+  assert.deepEqual(evidence.map(({ id, text }) => ({ id, text })), [{ id: sourceId, text: sentinel }]);
+
+  assert.match(chat(`/reflect apply ${proposal.id}`), /"status": "applied"/);
+  assert.match(chat('/reflect'), /No unconsumed conversation evidence\./);
+  assert.equal(await fs.readFile(requestsPath, 'utf8'), requests);
+});
 test('migration preserves originals in history, adds frontmatter/indexes, and is repeatable',async t=>{
  const dir=await home(t),root=path.join(dir,'memory'),before=await head(root);
  await fs.mkdir(path.join(root,'projects'));await fs.writeFile(path.join(root,'projects','work.md'),'A durable project fact.');

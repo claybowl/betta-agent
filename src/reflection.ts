@@ -14,8 +14,8 @@ export async function reflect(home:string,suppliedModels?:Models,signal?:AbortSi
   const release=await lockHome(home);let p:Proposal|undefined;
   try{
     const snapshot=await migrateMemory(home);const root=path.join(home,'memory');const settings=await reflectionSettings(home);const modelName=settings.model||(await readManifest(home)).model;
-    const consumed=await stateJson<string[]>(home,'reflection-consumed.json',[]);const pending=(await proposals(home)).filter(p=>['ready','running','conflict'].includes(p.status));
-    const all=recall(home,'',200).filter(m=>!consumed.includes(m.id));
+    const consumed=new Set(await stateJson<string[]>(home,'reflection-consumed.json',[]));const pending=(await proposals(home)).filter(p=>['ready','running','conflict'].includes(p.status));
+    const all=recall(home,'',200,consumed);
     if(!all.length)return {id:'none',base:snapshot.revision,status:'noop',sourceIds:[],summary:'No unconsumed conversation evidence.',model:modelName};
     const entries:RecallEntry[]=[];let size=0;for(const entry of all){const length=JSON.stringify(entry).length;if(size+length>settings.maxInputCharacters)break;entries.push(entry);size+=length;}
     if(!entries.length)throw new Error('The next recall message exceeds the reflection input budget; increase maxInputCharacters or inspect it manually');

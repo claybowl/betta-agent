@@ -130,7 +130,7 @@ Each agent's memory lives in `HOME/memory/` as Markdown files under their own Gi
 
 `/memory` shows status, searches, opens files, shows history and diffs, reverts, and syncs to a Git remote. `/memory graph` maps links between files.
 
-`/reflect` asks the agent to review recent conversations and propose memory changes, each tied to the conversation it came from. Nothing changes until you apply the proposal.
+`/reflect` asks the agent to review the newest conversation messages that haven’t already been used in an applied proposal. It can reach older messages when newer ones have already been used. Each proposed memory change cites its source messages. Nothing changes until you apply the proposal.
 
 Full details — budgets, migration, recovery and sync — are in the [memory guide](MEMORY.md).
 

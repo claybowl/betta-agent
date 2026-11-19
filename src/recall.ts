@@ -10,7 +10,7 @@ export function recordRecall(home:string,requestId:string,sessionId:string,role:
   const db=new DatabaseSync(path.join(home,'state','recall.sqlite'));
   try{db.exec('CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, requestId TEXT, sessionId TEXT, role TEXT, text TEXT, time TEXT)');db.prepare('INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?,?)').run(`${requestId}:${role}`,requestId,sessionId,role,redact(text).slice(0,128000),new Date().toISOString());}finally{db.close();}
 }
-export function recall(home:string,query='',limit=40):RecallEntry[] {
+export function recall(home:string,query='',limit=40,excludedIds?:ReadonlySet<string>):RecallEntry[] {
   const file=path.join(home,'state','recall.sqlite');if(!fs.existsSync(file))return [];
   const db=new DatabaseSync(file,{readOnly:true});
   try {
@@ -20,6 +20,7 @@ export function recall(home:string,query='',limit=40):RecallEntry[] {
     const matches: RecallEntry[] = [];
     const rows = db.prepare('SELECT * FROM messages ORDER BY rowid DESC').iterate() as unknown as Iterable<RecallEntry>;
     for (const row of rows) {
+      if (excludedIds?.has(row.id)) continue;
       const text = terms.length ? row.text.toLowerCase() : "";
       if (!terms.every(term => text.includes(term))) continue;
       matches.push(row);
