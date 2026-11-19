@@ -10,7 +10,7 @@ import { initHome, readManifest, exportHome } from "./home.js";
 import { listSessions, runAgent, type RunInput } from "./harness.js";
 import { doerConfig } from "./doer.js";
 const [command, homeArg, ...args] = process.argv.slice(2);
-const reflectionUsage = "reflect HOME [--apply | --status | --list]";
+const reflectionUsage = "reflect HOME [--apply | --status | --list | --preview ID]";
 async function main() {
   if (command === "doer-worker" && homeArg === "--protocol") {
     console.log("betta-doer/1");
@@ -40,6 +40,16 @@ async function main() {
   if (command === "memory") {
     const result=await memoryCommand(home,args[0]||'status',args.slice(1)); console.log(typeof result==='string'?result:JSON.stringify(result,null,2));
   } else if (command === "reflect") {
+    if (args.includes("--preview")) {
+      const conflict = args.find(arg => arg === "--apply" || arg === "--status" || arg === "--list");
+      if (conflict) throw new Error(`Cannot combine --preview and ${conflict}.`);
+      const [flag, id] = args;
+      if (args.length !== 2 || flag !== "--preview" || !id?.trim() || id.startsWith("-")) {
+        throw new Error(`--preview requires exactly one proposal ID. Usage: ${reflectionUsage}`);
+      }
+      console.log(JSON.stringify(await previewReflection(home, id), null, 2));
+      return;
+    }
     const unknownArgument = args.find(arg => arg !== "--apply" && arg !== "--status" && arg !== "--list");
     if (unknownArgument !== undefined) {
       throw new Error(`Unknown reflection argument ${JSON.stringify(unknownArgument)}. Usage: ${reflectionUsage}`);

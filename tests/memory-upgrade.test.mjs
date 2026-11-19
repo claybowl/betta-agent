@@ -65,7 +65,8 @@ test('reflection lists saved proposals across processes and reaches older uncons
   const readReflectionState = () => Promise.all(['reflection-proposals.json', 'reflection-consumed.json']
     .map(name => fs.readFile(path.join(dir, 'state', name))));
   const stateBeforeListing = await readReflectionState();
-  assert.deepEqual(list(), [proposal]);
+  const listed = list();
+  assert.deepEqual(listed, [proposal]);
   for (const flag of ['--apply', '--status']) {
     const conflict = runCli('reflect', ['--list', flag]);
     assert.equal(conflict.status, 1, conflict.error?.message ?? conflict.stderr);
@@ -73,6 +74,29 @@ test('reflection lists saved proposals across processes and reaches older uncons
   }
   assert.deepEqual(await readReflectionState(), stateBeforeListing);
   assert.equal(await fs.readFile(requestsPath, 'utf8'), requests);
+
+  const [{ id }] = listed;
+  const assertPreviewReadOnly = async () => {
+    assert.deepEqual(await readReflectionState(), stateBeforeListing);
+    assert.deepEqual(await fs.readFile(requestsPath), Buffer.from(requests));
+  };
+  const preview = JSON.parse(successfulOutput(runCli('reflect', ['--preview', id])));
+  assert.equal(preview.id, id);
+  assert.match(preview.diff, /^\+Prefer amber notebooks\.$/m);
+  await assertPreviewReadOnly();
+  for (const [args, error] of [
+    [['--preview', 'unknown-id'], /Unknown proposal/],
+    [['--preview'], /requires exactly one proposal ID/],
+    [['--preview', id, '--apply'], /--preview and --apply/],
+    [['--preview', id, '--status'], /--preview and --status/],
+    [['--list', '--preview', id], /--preview and --list/],
+    [['--preview', id, 'extra-id'], /requires exactly one proposal ID/],
+  ]) {
+    const result = runCli('reflect', args);
+    assert.equal(result.status, 1, result.error?.message ?? result.stderr);
+    assert.match(result.stderr, error);
+    await assertPreviewReadOnly();
+  }
 
   assert.match(chat(`/reflect apply ${proposal.id}`), /"status": "applied"/);
   assert.match(chat('/reflect'), /No unconsumed conversation evidence\./);
@@ -118,7 +142,7 @@ test('reflect status in chat and standalone counts evidence without changing sta
   const typo = runCli('reflect', ['--stats']);
   assert.equal(typo.status, 1, typo.error?.message ?? typo.stderr);
   assert.match(typo.stderr, /Unknown reflection argument "--stats"/);
-  assert.match(typo.stderr, /reflect HOME \[--apply \| --status \| --list\]/);
+  assert.match(typo.stderr, /reflect HOME \[--apply \| --status \| --list \| --preview ID\]/);
   await assertReadOnly();
 
   for (let i = 0; i < 2; i++) {

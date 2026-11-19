@@ -173,10 +173,10 @@ betta-agents resume HOME                       finish interrupted work
 betta-agents inspect HOME                      show identity and state
 betta-agents export HOME NEW_DIR [--continuation] [--history]
 betta-agents memory HOME COMMAND [ARGS]
-betta-agents reflect HOME [--apply | --status | --list]
+betta-agents reflect HOME [--apply | --status | --list | --preview ID]
 ```
 
-`reflect HOME --status` prints the eligible evidence counts as JSON. `reflect HOME --list` prints the same JSON array of saved proposals as chat's `/reflect list`. Both are read-only and make no provider calls. Choose at most one of `--apply`, `--status`, and `--list`. The standalone command rejects unknown arguments before starting reflection.
+`reflect HOME --status` prints the eligible evidence counts as JSON. `reflect HOME --list` prints the same JSON array of saved proposals as chat's `/reflect list`. Use a proposal ID from that list with `reflect HOME --preview ID` to see the saved proposal and its diff as JSON. Status, listing, and preview are read-only and make no provider calls. Choose at most one reflection flag. The standalone command rejects unknown arguments before starting reflection.
 
 `run` with the same `REQUEST_ID` executes once, however many times it is started.
 
