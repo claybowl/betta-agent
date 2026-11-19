@@ -39,6 +39,10 @@ async function main() {
   if (command === "memory") {
     const result=await memoryCommand(home,args[0]||'status',args.slice(1)); console.log(typeof result==='string'?result:JSON.stringify(result,null,2));
   } else if (command === "reflect") {
+    const unknownArgument = args.find(arg => arg !== "--apply" && arg !== "--status");
+    if (unknownArgument !== undefined) {
+      throw new Error(`Unknown reflection argument ${JSON.stringify(unknownArgument)}. Usage: reflect HOME [--apply | --status]`);
+    }
     if (args.includes("--status")) {
       if (args.includes("--apply")) throw new Error("Cannot combine --status and --apply.");
       console.log(JSON.stringify(await reflectionStatus(home), null, 2));

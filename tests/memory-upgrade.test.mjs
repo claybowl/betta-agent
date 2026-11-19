@@ -98,6 +98,12 @@ test('reflect status in chat and standalone counts evidence without changing sta
     assert.deepEqual(await readState('reflection-proposals.json'), proposalsBefore);
   };
   await assertReadOnly();
+  const typo = runCli('reflect', ['--stats']);
+  assert.equal(typo.status, 1, typo.error?.message ?? typo.stderr);
+  assert.match(typo.stderr, /Unknown reflection argument "--stats"/);
+  assert.match(typo.stderr, /reflect HOME \[--apply \| --status\]/);
+  await assertReadOnly();
+
   for (let i = 0; i < 2; i++) {
     const result = runCli('reflect', ['--status']);
     assert.equal(result.status, 0, result.error?.message ?? result.stderr);
