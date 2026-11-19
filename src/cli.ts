@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { memoryCommand, importMemoryBundle } from "./memory-service.js";
-import { reflect, applyReflection, discardReflection, previewReflection, proposals, reflectionStatus } from "./reflection.js";
+import { reflect, applyReflection, discardReflection, previewReflection, proposals, reflectionStatus, retryReflection } from "./reflection.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -10,7 +10,13 @@ import { initHome, readManifest, exportHome } from "./home.js";
 import { listSessions, runAgent, type RunInput } from "./harness.js";
 import { doerConfig } from "./doer.js";
 const [command, homeArg, ...args] = process.argv.slice(2);
-const reflectionUsage = "reflect HOME [--apply [ID] | --status | --list | --preview ID | --discard ID]";
+const reflectionUsage = "reflect HOME [--apply [ID] | --status | --list | --preview ID | --discard ID | --retry ID]";
+function reflectionSignal() {
+  const controller = new AbortController();
+  process.once("SIGTERM", () => controller.abort());
+  process.once("SIGINT", () => controller.abort());
+  return controller.signal;
+}
 async function main() {
   if (command === "doer-worker" && homeArg === "--protocol") {
     console.log("betta-doer/1");
@@ -40,16 +46,22 @@ async function main() {
   if (command === "memory") {
     const result=await memoryCommand(home,args[0]||'status',args.slice(1)); console.log(typeof result==='string'?result:JSON.stringify(result,null,2));
   } else if (command === "reflect") {
-    const proposalAction = args.includes("--discard") ? "--discard" : "--preview";
-    if (args.includes(proposalAction)) {
-      const conflict = args.find(arg => arg === "--apply" || arg === "--status" || arg === "--list" || arg === "--preview" && proposalAction === "--discard");
+    const proposalActions = ["--retry", "--discard", "--preview"] as const;
+    const proposalAction = proposalActions.find(action => args.includes(action));
+    if (proposalAction) {
+      const conflict = args.find(arg => arg !== proposalAction &&
+        (proposalActions.some(action => action === arg) || ["--apply", "--status", "--list"].includes(arg)));
       if (conflict) throw new Error(`Cannot combine ${proposalAction} and ${conflict}.`);
       const [flag, id] = args;
       if (args.length !== 2 || flag !== proposalAction || !id?.trim() || id.startsWith("-")) {
         throw new Error(`${proposalAction} requires exactly one proposal ID. Usage: ${reflectionUsage}`);
       }
-      const action = proposalAction === "--discard" ? discardReflection : previewReflection;
-      console.log(JSON.stringify(await action(home, id), null, 2));
+      const actions = {
+        "--retry": () => retryReflection(home, id, reflectionSignal()),
+        "--discard": () => discardReflection(home, id),
+        "--preview": () => previewReflection(home, id),
+      };
+      console.log(JSON.stringify(await actions[proposalAction](), null, 2));
       return;
     }
     const [flag, id] = args;
@@ -77,8 +89,7 @@ async function main() {
       console.log(JSON.stringify(await reflectionStatus(home), null, 2));
       return;
     }
-    const controller=new AbortController(); process.once('SIGTERM',()=>controller.abort());process.once('SIGINT',()=>controller.abort());
-    const proposal=await reflect(home,undefined,controller.signal);
+    const proposal=await reflect(home,undefined,reflectionSignal());
     console.log(JSON.stringify(args.includes('--apply')&&proposal.status==='ready'?await applyReflection(home,proposal.id):proposal.id==='none'?proposal:await previewReflection(home,proposal.id),null,2));
   } else if (command === "memory-import") {
     if(args.length<3)throw new Error('memory-import BUNDLE NEW_HOME NAME PROVIDER/MODEL');

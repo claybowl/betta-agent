@@ -143,6 +143,64 @@ test('reflection lists saved proposals across processes and reaches older uncons
   assert.deepEqual((await readReflectionState())[1], stateBeforeDiscard[1]);
   assert.deepEqual(await fs.readFile(requestsPath), requestsBeforeDiscard);
 });
+test('standalone reflect retries a saved failure only when requested', async t => {
+  const dir = await home(t, 'ollama/test');
+  const sentinel = 'Prefer amber notebooks.';
+  recordRecall(dir, 'retry', 'main', 'user', sentinel);
+  await saveState(dir, 'reflection-consumed.json', []);
+  const requestsPath = path.join(dir, 'requests.jsonl');
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  let response = 'invalid JSON';
+  const run = (...args) => spawnSync(process.execPath, ['--import', provider, cli, 'reflect', dir, ...args], {
+    encoding: 'utf8', timeout: 20_000,
+    env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
+      COMPACT_REQUESTS: requestsPath, REFLECTION_FIXTURE_RESPONSE: response, NO_COLOR: '1' },
+  });
+  const json = result => {
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const readState = name => fs.readFile(path.join(dir, 'state', name));
+  const readRequests = () => fs.readFile(requestsPath, 'utf8');
+  const failure = run();
+  assert.equal(failure.status, 1, failure.error?.message ?? failure.stderr);
+  const [failed] = json(run('--list'));
+  assert.equal(failed.status, 'failed');
+  const firstRequest = await readRequests();
+  assert.equal(firstRequest.trim().split('\n').length, 1);
+  assert.equal(json(run()).status, 'failed');
+  assert.equal(await readRequests(), firstRequest);
+
+  response = JSON.stringify({
+    summary: 'Notebook preference',
+    changes: [{ path: 'notebooks.md', content: sentinel, sourceIds: ['retry:user'] }],
+  });
+  const ready = json(run('--retry', failed.id));
+  assert.equal(ready.id, failed.id);
+  assert.equal(ready.status, 'ready');
+  assert.deepEqual(json(run('--list')), [ready]);
+  const requests = await readRequests();
+  assert.ok(requests.startsWith(firstRequest));
+  assert.equal(requests.trim().split('\n').length, 2);
+  const consumed = await readState('reflection-consumed.json');
+  assert.deepEqual(JSON.parse(consumed), []);
+  assert.equal((await committedFiles(path.join(dir, 'memory'))).has('notebooks.md'), false);
+  const saved = await readState('reflection-proposals.json');
+  for (const [args, error] of [
+    [['--retry', failed.id], /Only failed or interrupted proposals/],
+    [['--retry', failed.id, '--apply'], /--retry and --apply/],
+    [['--retry'], /requires exactly one proposal ID/],
+    [['--retry', failed.id, 'extra-id'], /requires exactly one proposal ID/],
+  ]) {
+    const result = run(...args);
+    assert.equal(result.status, 1, result.error?.message ?? result.stderr);
+    assert.match(result.stderr, error);
+    assert.deepEqual(await readState('reflection-proposals.json'), saved);
+    assert.deepEqual(await readState('reflection-consumed.json'), consumed);
+    assert.equal(await readRequests(), requests);
+  }
+});
 test('reflect status in chat and standalone counts evidence without changing state or calling the provider', async t => {
   const dir = await home(t, 'ollama/test');
   const expected = [
@@ -183,7 +241,7 @@ test('reflect status in chat and standalone counts evidence without changing sta
   const typo = runCli('reflect', ['--stats']);
   assert.equal(typo.status, 1, typo.error?.message ?? typo.stderr);
   assert.match(typo.stderr, /Unknown reflection argument "--stats"/);
-  assert.match(typo.stderr, /reflect HOME \[--apply \[ID\] \| --status \| --list \| --preview ID \| --discard ID\]/);
+  assert.match(typo.stderr, /reflect HOME \[--apply \[ID\] \| --status \| --list \| --preview ID \| --discard ID \| --retry ID\]/);
   await assertReadOnly();
 
   for (let i = 0; i < 2; i++) {
