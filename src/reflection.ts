@@ -10,15 +10,45 @@ export interface Proposal { id:string; base:string; revision?:string; branch?:st
 export async function reflectionSettings(home:string):Promise<ReflectionSettings>{const s={...reflectionDefaults,...await stateJson<Partial<ReflectionSettings>>(home,'reflection-settings.json',{})};if(!Number.isInteger(s.maxInputCharacters)||s.maxInputCharacters<1000||s.maxInputCharacters>64000||!Number.isInteger(s.maxOutputTokens)||s.maxOutputTokens<256||s.maxOutputTokens>8192||!Number.isInteger(s.timeoutSeconds)||s.timeoutSeconds<1||s.timeoutSeconds>300||!Number.isFinite(s.maxCostUsd)||s.maxCostUsd<0||s.maxCostUsd>10||s.model!==undefined&&(!s.model.includes('/')||s.model.endsWith('/')))throw new Error('Invalid reflection budget');return s;}
 export async function proposals(home:string):Promise<Proposal[]>{return stateJson(home,'reflection-proposals.json',[]);}
 async function store(home:string,p:Proposal){const all=await proposals(home);const i=all.findIndex(v=>v.id===p.id);if(i>=0)all[i]=p;else all.push(p);await saveState(home,'reflection-proposals.json',all);return p;}
+const evidenceWindowLimit = 200;
+const emptyEvidence = 'No unconsumed conversation evidence.';
+const overBudgetEvidence = 'The next recall message exceeds the reflection input budget; increase maxInputCharacters or inspect it manually';
+
+async function selectEvidence(home: string, maxInputCharacters: number) {
+  const consumed = new Set(await stateJson<string[]>(home, 'reflection-consumed.json', []));
+  const window = recall(home, '', evidenceWindowLimit, consumed);
+  const entries: RecallEntry[] = [];
+  let selectedCharacters = 0;
+  for (const entry of window) {
+    const length = JSON.stringify(entry).length;
+    if (selectedCharacters + length > maxInputCharacters) break;
+    entries.push(entry);
+    selectedCharacters += length;
+  }
+  return { entries, selectedCharacters, windowMessages: window.length };
+}
+
+export async function reflectionStatus(home: string) {
+  const { maxInputCharacters } = await reflectionSettings(home);
+  const { entries, selectedCharacters, windowMessages } = await selectEvidence(home, maxInputCharacters);
+  return {
+    selectedMessages: entries.length,
+    windowMessages,
+    windowLimit: evidenceWindowLimit,
+    selectedCharacters,
+    maxInputCharacters,
+    ...(!windowMessages ? { reason: emptyEvidence } : !entries.length ? { reason: overBudgetEvidence } : {}),
+  };
+}
+
 export async function reflect(home:string,suppliedModels?:Models,signal?:AbortSignal):Promise<Proposal> {
   const release=await lockHome(home);let p:Proposal|undefined;
   try{
     const snapshot=await migrateMemory(home);const root=path.join(home,'memory');const settings=await reflectionSettings(home);const modelName=settings.model||(await readManifest(home)).model;
-    const consumed=await stateJson<string[]>(home,'reflection-consumed.json',[]);const pending=(await proposals(home)).filter(p=>['ready','running','conflict'].includes(p.status));
-    const all=recall(home,'',200).filter(m=>!consumed.includes(m.id));
-    if(!all.length)return {id:'none',base:snapshot.revision,status:'noop',sourceIds:[],summary:'No unconsumed conversation evidence.',model:modelName};
-    const entries:RecallEntry[]=[];let size=0;for(const entry of all){const length=JSON.stringify(entry).length;if(size+length>settings.maxInputCharacters)break;entries.push(entry);size+=length;}
-    if(!entries.length)throw new Error('The next recall message exceeds the reflection input budget; increase maxInputCharacters or inspect it manually');
+    const pending=(await proposals(home)).filter(p=>['ready','running','conflict'].includes(p.status));
+    const { entries, windowMessages } = await selectEvidence(home, settings.maxInputCharacters);
+    if(!windowMessages)return {id:'none',base:snapshot.revision,status:'noop',sourceIds:[],summary:emptyEvidence,model:modelName};
+    if(!entries.length)throw new Error(overBudgetEvidence);
     const sourceIds=entries.map(m=>m.id);const id=digest((await readManifest(home)).id+'\n'+snapshot.revision+'\n'+sourceIds.join('\n')).slice(0,24);
     const existing=(await proposals(home)).find(p=>p.id===id);if(existing&&existing.status==='running') {
       // Ownership is exclusive, so this running receipt belongs to a process that exited.
@@ -69,5 +99,5 @@ export async function applyReflection(home:string,id:string){const release=await
  }finally{release();}}
 export async function discardReflection(home:string,id:string){const release=await lockHome(home);try{const all=await proposals(home);const p=all.find(p=>p.id===id);if(!p)throw new Error('Unknown proposal');if(p.status==='applied')throw new Error('Revert committed memory to undo an applied proposal');p.status='failed';p.error='Discarded by user; evidence remains unconsumed';await store(home,p);return p;}finally{release();}}
 
-export async function retryReflection(home:string,id:string){const release=await lockHome(home);try{const p=(await proposals(home)).find(p=>p.id===id);if(!p||!['failed','running'].includes(p.status))throw new Error('Only failed or interrupted proposals can be retried');p.status='failed';p.error='Retry requested';await store(home,p);}finally{release();}return reflect(home);}
+export async function retryReflection(home:string,id:string,signal?:AbortSignal){const release=await lockHome(home);try{const p=(await proposals(home)).find(p=>p.id===id);if(!p||!['failed','running'].includes(p.status))throw new Error('Only failed or interrupted proposals can be retried');p.status='failed';p.error='Retry requested';await store(home,p);}finally{release();}return reflect(home,undefined,signal);}
 export async function previewReflection(home:string,id:string){const p=(await proposals(home)).find(p=>p.id===id);if(!p)throw new Error('Unknown proposal');return {...p,diff:p.revision?await git(path.join(home,'memory'),['diff',p.base,p.revision,'--']):undefined};}

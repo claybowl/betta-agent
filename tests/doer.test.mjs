@@ -298,11 +298,13 @@ test('the agent key stays out of exports, the journal, recall and saved work', a
 // The model is a local OpenAI-compatible fixture reached through the built-in Ollama provider.
 async function fakeModel(t, reply) {
   const http = await import('node:http');
-  const state = { calls: 0, hold: false, waiting: [] };
+  const state = { calls: 0, hold: false, waiting: [], bodies: [] };
   const server = http.createServer(async (req, res) => {
-    for await (const _ of req) { /* drain */ }
+    let body = '';
+    for await (const chunk of req) body += chunk;
     if (req.method !== 'POST') { res.writeHead(404).end(); return; }
     state.calls++;
+    state.bodies.push(body);
     if (state.hold) { state.waiting.forEach(r => r()); return; } // never answers: the run is mid-request when Doer stops it
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write(`data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model: 'test', choices: [{ index: 0, delta: { role: 'assistant', content: reply }, finish_reason: null }] })}\n\n`);
@@ -314,9 +316,10 @@ async function fakeModel(t, reply) {
   return { state, url: `http://127.0.0.1:${server.address().port}/v1` };
 }
 const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
-function startCli(args, env) {
+function startCli(args, env, input) {
   const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DOER_')));
-  const proc = spawn(process.execPath, [cli, ...args], { env: { ...clean, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const proc = spawn(process.execPath, [cli, ...args], { env: { ...clean, ...env }, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+  if (input !== undefined) proc.stdin.end(input);
   let stdout = '', stderr = '';
   proc.stdout.on('data', c => stdout += c); proc.stderr.on('data', c => stderr += c);
   const timer = setTimeout(() => proc.kill('SIGKILL'), 30000);
@@ -351,4 +354,49 @@ test('the CLI run command works as a Doer process-adapter command and stops clea
   assert.equal(after.status, 0, after.stderr + after.stdout);
   assert.equal(model.state.calls, callsBefore + 1, 'one model call for the new heartbeat only');
   assert.doesNotMatch(after.stderr, /recover/i);
+});
+
+test('CLI and chat select completed conversations across restarts and isolate agent homes', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'donjon-session-cli-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const firstHome = path.join(dir, 'first'), otherHome = path.join(dir, 'other');
+  const first = await initHome(firstHome, 'First', 'ollama/test');
+  const other = await initHome(otherHome, 'Other', 'ollama/test');
+  const model = await fakeModel(t, 'Test reply.');
+  const env = { OLLAMA_BASE_URL: model.url, DONJON_CONFIG_DIR: path.join(dir, 'settings') };
+  const cliRun = async (args, input) => {
+    const result = await startCli(args, env, input).done;
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    return result.stdout;
+  };
+  const seeded = await runAgent({ home: firstHome, sessionKey: 'older', model: 'faux/test', prompt: 'Only in older session', requestId: 'older' }, undefined, fake([fauxAssistantMessage('Older reply')]).models);
+  const outside = await runAgent({ home: firstHome, cwd: dir, model: 'faux/test', prompt: 'Only in outside workspace', requestId: 'outside' }, undefined, fake([fauxAssistantMessage('Outside reply')]).models);
+  await cliRun(['run', firstHome, 'Only in default session', 'older']);
+  await cliRun(['run', otherHome, 'Only in other agent']);
+  const id = `${first.id}:${seeded.sessionId}`;
+  const sessions = JSON.parse(await cliRun(['sessions', firstHome]));
+  assert.equal(sessions.length, 2);
+  assert.equal(sessions[1].id, id);
+  const otherSessions = JSON.parse(await cliRun(['sessions', otherHome]));
+  assert.equal(otherSessions.length, 1);
+  assert.ok(otherSessions[0].id.startsWith(other.id + ':'));
+  const before = model.state.calls;
+  const rejected = await startCli(['run', otherHome, 'Wrong home', '--session', id], env).done;
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /Unknown session/);
+  const wrongWorkspace = await startCli(['run', firstHome, 'Wrong workspace', '--session', `${first.id}:${outside.sessionId}`], env).done;
+  assert.equal(wrongWorkspace.status, 1);
+  assert.match(wrongWorkspace.stderr, /Unknown session/);
+  assert.equal(model.state.calls, before);
+  await cliRun(['run', firstHome, 'Continue this session', '--session', id]);
+  const cliBody = model.state.bodies.at(-1);
+  assert.match(cliBody, /Only in older session/);
+  assert.doesNotMatch(cliBody, /Only in default session|Only in other agent/);
+  const chat = await cliRun(['chat', firstHome], `/sessions\n/session ${id}\nKeep going in chat\n/session default\nDefault chat turn\n/exit\n`);
+  assert.match(chat, /Using conversation/);
+  assert.match(chat, /Using the default conversation/);
+  assert.match(model.state.bodies.at(-2), /Only in older session/);
+  assert.doesNotMatch(model.state.bodies.at(-2), /Only in default session/);
+  assert.match(model.state.bodies.at(-1), /Only in default session/);
+  assert.doesNotMatch(model.state.bodies.at(-1), /Only in older session/);
 });

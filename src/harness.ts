@@ -12,13 +12,13 @@ import { skillCatalog, readSkill } from "./skills.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { AssistantEntry, Harness, createRegistry, defineDoc, defineExtension, defineTool, section, type Submission, type SubmissionId, type ConversationId } from "@earendil-works/pi-durable";
+import { AssistantEntry, Harness, createRegistry, defineDoc, defineExtension, defineTool, section, type Conversation, type LiveState, type Submission, type SubmissionId, type ConversationId, type Cursor, type EntryId, type Storage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import { createProvider, type Models } from "@earendil-works/pi-ai";
+import { createModels, createProvider, type Models } from "@earendil-works/pi-ai";
 import { appModels } from "./credentials.js";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { Type } from "typebox";
@@ -37,7 +37,7 @@ const State = defineDoc<{ conversations: Record<string, ConversationId>; pending
 });
 export interface RunInput {
   home: string; cwd?: string; memoryDir?: string; model?: string; baseUrl?: string;
-  prompt?: string; requestId?: string; sessionKey?: string; instructions?: string; resumeOnly?: boolean; costReporter?: "adapter"; allowShell?: boolean;
+  prompt?: string; requestId?: string; sessionKey?: string; session?: string; instructions?: string; resumeOnly?: boolean; costReporter?: "adapter"; allowShell?: boolean;
 }
 export interface RunResult {
   sessionId: string; requestId: string; summary: string; recovered: boolean;
@@ -63,15 +63,260 @@ export async function makeModels(model: string, baseUrl?: string): Promise<Model
   return models;
 }
 
+export const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
+/** A command with no timeout could hold a turn forever; default it, and say that each call is a fresh shell. */
+export function boundedBash<T extends { description: string; execute: (args: any, ...rest: any[]) => any }>(tool: T): T {
+  return { ...tool,
+    description: `${tool.description} Defaults to ${DEFAULT_BASH_TIMEOUT_SECONDS} seconds when no timeout is given; pass a larger timeout for long builds or installs. Each call runs in a fresh shell in the working directory: cd and export do not carry over, so chain dependent steps with && in one command. Stdin is closed, so interactive prompts, editors and REPLs get no input; use non-interactive flags (git commit -m, npm init -y). Run servers in the background with & and stop them when done.`,
+    execute: (args: any, ...rest: any[]) => tool.execute({ ...args, timeout: args?.timeout ?? DEFAULT_BASH_TIMEOUT_SECONDS }, ...rest) };
+}
+/** Pulls the human message out of a provider error body such as `402 {"error":{"message":"Insufficient credits"}}`. */
+export function providerMessage(detail: string) {
+  const found: string[] = [];
+  const walk = (text: string, depth: number) => {
+    const start = text.indexOf("{"); if (start < 0 || depth > 3) return;
+    try { const v = JSON.parse(text.slice(start)); const m = v?.error?.message ?? v?.message ?? v?.detail;
+      if (typeof m === "string") { found.push(m); walk(m, depth + 1); } } catch { /* not JSON */ }
+  };
+  walk(detail, 0);
+  const msg = found.at(-1)?.split("\n")[0].trim();
+  const status = /^\s*(\d{3})\b/.exec(detail)?.[1] || [detail, ...found].map(t => /"code":\s*(\d{3})/.exec(t)?.[1]).find(Boolean);
+  return (msg ? `${status ? status + " " : ""}${msg}` : detail.slice(0, 300)).replace(/\.+$/, "");
+}
 /** One readable line for a run that did not answer; raw detail stays in the runtime log. */
 export function runFailureMessage(result: unknown, model: string) {
   const r = (result || {}) as { reason?: string; detail?: string; status?: string };
   const detail = String(r.detail || '');
   if (r.reason === "model_error" && /timed out|terminated|ETIMEDOUT|ECONNRESET/i.test(detail))
     return `${model} did not respond (${detail.replace(/\.$/, "")}). The provider may be down or overloaded; nothing was lost. Try again, or switch with /model.`;
-  if (r.reason === "model_error") return `${model} returned an error: ${detail || "no detail"}. Try again, or switch with /model.`;
-  if (r.reason === "turn_limit") return "Stopped at the turn limit. Raise it in /runtime or ask the agent to continue.";
+  if (r.reason === "model_error") return `${model} returned an error: ${providerMessage(detail) || "no detail"}. ${/\b(402|429)\b|credit|quota|limit/i.test(detail) ? "This is a billing or rate limit at the provider; add credit there or switch with /model." : "Try again, or switch with /model."}`;
+  if (r.reason === "turn_limit") return "Paused at the turn limit; the work so far is kept. Say \"continue\" to keep going, or raise maxTurns in /runtime.";
   return `Run did not complete (${r.reason || r.status || "unknown"}${detail ? ": " + detail : ""}).`;
+}
+function workspaceKey(home: string, cwd: string, name = 'main') {
+  return hash(`${name}\n${cwd === home ? '@agent-home' : cwd}`);
+}
+async function sessionInWorkspace(runtime: Harness, conversations: Record<string, ConversationId>, id: ConversationId, home: string, cwd: string) {
+  const conversation = await runtime.conversation(id, context);
+  if (!conversation) return undefined;
+  if (conversations[workspaceKey(home, cwd)] === id || (await conversation.agent(context)).cwd === cwd) return conversation;
+  return undefined;
+}
+async function* completedAnswers(storage: Storage, id: ConversationId, order: 'ascending' | 'descending') {
+  // Submissions belong to their original conversation. Follow the fork edges
+  // to include inherited answers, stopping at each branch's inclusive cutoff.
+  const lineage: { id: ConversationId; through?: EntryId }[] = [];
+  let through: EntryId | undefined;
+  let record = await storage.conversation(id, context);
+  while (record) {
+    lineage.push({ id: record.id, through });
+    if (!record.parent) break;
+    if (through === undefined || record.parent.at < through) through = record.parent.at;
+    record = await storage.conversation(record.parent.conversationId, context);
+  }
+  if (order === 'ascending') lineage.reverse();
+  for (const source of lineage) {
+    let cursor: Cursor | undefined;
+    do {
+      const page = await storage.scanSubmissions({ conversationId: source.id, status: 'done', order }, 32, cursor, context);
+      for (const submission of page.items) {
+        if (submission.type === 'input' && submission.status === 'done'
+          && (source.through === undefined || submission.answer <= source.through)) yield submission.answer;
+      }
+      cursor = page.next;
+    } while (cursor);
+  }
+}
+export async function recoveryStatus(inputHome: string, verbose = false) {
+  const status = (pending?: Pending | null) => {
+    const pendingRequestId = pending?.requestId ?? null;
+    if (!verbose) return { pendingRequestId };
+    return {
+      pendingRequestId,
+      conversationId: pending?.conversation ?? null,
+      model: pending?.model ?? null,
+    };
+  };
+  const home = await fs.realpath(inputHome);
+  await readManifest(home);
+  const release = await lockHome(home);
+  try {
+    const file = path.join(home, "state", "runtime.sqlite");
+    try { await fs.access(file); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return status();
+      throw error;
+    }
+    const runtime = await Harness.open(await openNodeSqliteStorage(file), {
+      models: createModels(), registry: createRegistry(), readOnly: true,
+    }, context);
+    try {
+      const state = await runtime.snapshot(State, context);
+      return status(state?.pending);
+    } finally {
+      await runtime.close(context);
+    }
+  } finally {
+    release();
+  }
+}
+export async function listSessions(inputHome: string) {
+  const home = await fs.realpath(inputHome);
+  const manifest = await readManifest(home);
+  const settings = await readSettings(home);
+  const cwd = await fs.realpath(settings.cwd || home);
+  const release = await lockHome(home);
+  try {
+    const file = path.join(home, 'state', 'runtime.sqlite');
+    try { await fs.access(file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+    const storage = await openNodeSqliteStorage(file);
+    const runtime = await Harness.open(storage, { models: createModels(), registry: createRegistry(), readOnly: true }, context);
+    try {
+      const state = await runtime.snapshot(State, context);
+      if (!state) return [];
+      const sessions: { id: string; lastCompletedAt: string | null; answerId: number }[] = [];
+      for (const id of Object.values(state.conversations)) {
+        if (!await sessionInWorkspace(runtime, state.conversations, id, home, cwd)) continue;
+        for await (const answerId of completedAnswers(storage, id, 'descending')) {
+          const answer = await storage.entry(id, answerId, context);
+          const timestamp = answer?.entry.model?.at(-1)?.timestamp;
+          sessions.push({
+            id: `${manifest.id}:${id}`,
+            lastCompletedAt: timestamp === undefined ? null : new Date(timestamp).toISOString(),
+            answerId,
+          });
+          break;
+        }
+      }
+      return sessions.sort((a, b) => b.answerId - a.answerId).map(({ id, lastCompletedAt }) => ({ id, lastCompletedAt }));
+    } finally {
+      await runtime.close(context);
+    }
+  } finally {
+    release();
+  }
+}
+export async function forkSession(inputHome: string, session: string | undefined, turn: number) {
+  if (!Number.isSafeInteger(turn) || turn < 1) throw new Error('Usage: /fork N (a positive completed turn number)');
+  const home = await fs.realpath(inputHome);
+  const manifest = await readManifest(home);
+  const settings = await readSettings(home);
+  const cwd = await fs.realpath(settings.cwd || home);
+  const release = await lockHome(home);
+  const noTurn = `No completed turn ${turn} in the selected conversation.`;
+  try {
+    const file = path.join(home, 'state', 'runtime.sqlite');
+    try { await fs.access(file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(noTurn); throw error; }
+    const storage = await openNodeSqliteStorage(file);
+    const runtime = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, context);
+    try {
+      const state = await runtime.snapshot(State, context);
+      if (state?.pending) throw new Error('Use /resume to finish interrupted work before forking.');
+      if (!state) throw new Error(noTurn);
+      const id = session
+        ? Object.values(state.conversations).find(id => session === `${manifest.id}:${id}`)
+        : state.conversations[workspaceKey(home, cwd)];
+      const conversation = id === undefined ? undefined : await sessionInWorkspace(runtime, state.conversations, id, home, cwd);
+      if (id === undefined || !conversation) throw new Error(noTurn);
+      let index = 0;
+      for await (const answer of completedAnswers(storage, id, 'ascending')) {
+        if (++index !== turn) continue;
+        const fork = await conversation.fork(answer, {
+          ownership: { kind: 'ownerless' },
+          agent: { cwd },
+          init: async (tx, id) => {
+            (await tx.doc(State)).conversations[`fork:${id}`] = id;
+          },
+        }, context);
+        return `${manifest.id}:${fork.id}`;
+      }
+      throw new Error(noTurn);
+    } finally {
+      await runtime.close(context);
+    }
+  } finally {
+    release();
+  }
+}
+export async function compactSession(inputHome: string, session: string | undefined, signal: AbortSignal) {
+  const home = await fs.realpath(inputHome);
+  const manifest = await readManifest(home);
+  const settings = await readSettings(home);
+  const cwd = await fs.realpath(settings.cwd || home);
+  const release = await lockHome(home);
+  const timeout = settings.timeoutSeconds ? AbortSignal.timeout(settings.timeoutSeconds * 1000) : undefined;
+  const runSignal = timeout ? AbortSignal.any([signal, timeout]) : signal;
+  const file = path.join(home, "state", "runtime.sqlite");
+  const noConversation = "No conversation to compact in this working directory.";
+  try {
+    runSignal.throwIfAborted();
+    try { await fs.access(file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return noConversation; throw error; }
+    const reader = await Harness.open(await openNodeSqliteStorage(file), {
+      models: createModels(), registry: createRegistry(), readOnly: true,
+    }, context);
+    let id: ConversationId | undefined;
+    let model: string;
+    try {
+      const state = await reader.snapshot(State, context);
+      if (!state) return noConversation;
+      if (state.pending) throw new Error("Use /resume to finish interrupted work before compacting.");
+      id = session
+        ? Object.values(state.conversations).find(id => session === `${manifest.id}:${id}`)
+        : state.conversations[workspaceKey(home, cwd)];
+      const conversation = id === undefined ? undefined : await sessionInWorkspace(reader, state.conversations, id, home, cwd);
+      if (id === undefined || !conversation) {
+        if (session) throw new Error("Unknown session for this agent and working directory.");
+        return noConversation;
+      }
+      const ref = (await conversation.agent(context)).model;
+      if (!ref) throw new Error("The conversation has no configured model.");
+      model = `${ref.provider}/${ref.modelId}`;
+    } finally {
+      await reader.close(context);
+    }
+    const models = await makeModels(model);
+    runSignal.throwIfAborted();
+    const runtime = await Harness.open(await openNodeSqliteStorage(file), {
+      models, registry: createRegistry(),
+      settings: { compaction: { enabled: settings.compaction }, retry: { maxRetries: 1 }, stream: { timeoutMs: 120_000, maxRetries: 0 } },
+    }, context);
+    try {
+      const conversation = await runtime.conversation(id, context);
+      if (!conversation) throw new Error("Stored conversation is missing");
+      runSignal.throwIfAborted();
+      const task = await conversation.compact(undefined, context);
+      let abortWork: ReturnType<typeof runtime.abortTask> | undefined;
+      const abort = () => {
+        abortWork = runtime.abortTask(task, context);
+        void abortWork.catch(() => {});
+      };
+      runSignal.addEventListener("abort", abort, { once: true });
+      if (runSignal.aborted) abort();
+      try {
+        const { state: { outcome } } = await runtime.waitForTask(task, context);
+        if (outcome.status === "failed") throw new Error(providerMessage(outcome.error.message));
+        if (outcome.status !== "completed") {
+          runSignal.throwIfAborted();
+          throw new Error("Compaction was stopped.");
+        }
+        const result = outcome.result as { submissionId?: SubmissionId };
+        if (result.submissionId === undefined) return "No older context to compact.";
+        const submission = await runtime.submission(result.submissionId, context);
+        if ((await submission?.wait(context))?.status !== "done") throw new Error("Compaction summary could not be saved.");
+        return "Conversation compacted.";
+      } finally {
+        runSignal.removeEventListener("abort", abort);
+        await abortWork;
+      }
+    } finally {
+      await runtime.close(context);
+    }
+  } finally {
+    release();
+  }
 }
 export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedModels?: Models, signal?: AbortSignal, suppliedConnections?: Connections): Promise<RunResult> {
   // Doer integration is on only when all four DOER_* variables are in the environment. Read before taking the lock.
@@ -161,7 +406,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
         return { output: [{ type: "text", text: skill.content }] };
       } });
     registry.install(defineExtension({ name: "agent-skills", sections: [section("skills", () => skillCatalog(home))], tools: [activity.wrap(skillTool)] }));
-    const coding = (CodingTools.tools || []).filter(t => t.name === "read" || (t.name === "bash" ? permissions.shell : permissions.files)).map(t => activity.wrap(t));
+    const coding = (CodingTools.tools || []).filter(t => t.name === "read" || (t.name === "bash" ? permissions.shell : permissions.files)).map(t => activity.wrap(t.name === "bash" ? boundedBash(t) : t));
     registry.install({ ...CodingTools, tools: coding });
     const mcpTools = connections.tools().map(t => activity.wrap(t));
     registry.install(defineExtension({ name: "mcp-connections", tools: mcpTools }));
@@ -215,8 +460,53 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       })().catch(error => emit({ type: "error", message: String(error) }));
     };
     runSignal.addEventListener("abort", abortHandler, { once: true });
-    const settle = async (submission: Submission) => {
-      const result = await submission.wait(context);
+    const settle = async (submission: Submission, conversation: Conversation) => {
+      const watch = await conversation.watch(context, { min: 1, max: 2 });
+      let waitingSince: number | undefined;
+      let nextNoticeMs = 5_000;
+      let lastRetry: string | undefined;
+      const observe = (value: typeof watch.value) => {
+        if (runSignal.aborted) return;
+        const live = value.docs["pi.live"] as LiveState | undefined;
+        const generation = live?.run?.inputs.includes(submission.id) ? live.generation : undefined;
+        if (!generation || generation.retry || generation.message) waitingSince = undefined;
+        else if (waitingSince === undefined) {
+          waitingSince = performance.now();
+          nextNoticeMs = 5_000;
+        }
+        if (generation?.retry) {
+          const retryKey = `${live?.run?.taskId}:${generation.attempt}:${generation.retry.at}`;
+          if (retryKey === lastRetry) return;
+          lastRetry = retryKey;
+          emit({ type: "provider_retry", model: selected, attempt: generation.attempt + 1,
+            delayMs: Math.max(0, generation.retry.at - Date.now()) });
+        }
+      };
+      const timer = setInterval(() => {
+        if (waitingSince === undefined || runSignal.aborted) return;
+        const elapsedMs = Math.floor(performance.now() - waitingSince);
+        if (elapsedMs < nextNoticeMs) return;
+        nextNoticeMs = elapsedMs + 10_000;
+        emit({ type: "provider_wait", model: selected, elapsedMs });
+      }, 1_000).unref();
+      let stopped: ReturnType<typeof watch.stop> | undefined;
+      const stop = () => {
+        clearInterval(timer);
+        return stopped ??= watch.stop();
+      };
+      const stopOnAbort = () => { void stop(); };
+      runSignal.addEventListener("abort", stopOnAbort, { once: true });
+      let result: Awaited<ReturnType<Submission["wait"]>>;
+      try {
+        if (!runSignal.aborted) {
+          watch.start(async call => { if (call.kind === "value") observe(call.value); });
+          observe(watch.value);
+        }
+        result = await submission.wait(context);
+      } finally {
+        runSignal.removeEventListener("abort", stopOnAbort);
+        await stop();
+      }
       if (result.status !== "done" || result.type !== "input") {
         await runtime.commit(async tx => { (await tx.doc(State)).pending = null; }, context);
         throw new Error(runFailureMessage(result, selected));
@@ -234,6 +524,13 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
     // Without a known run there is no stable id: the request still runs, but is not deduplicated.
     if (doerStart && !requestId && !input.resumeOnly) requestId = doerStart.runId || randomUUID();
     let conversationId: ConversationId | undefined;
+    const selectedSessionId = !input.resumeOnly && input.session
+      ? Object.values(state.conversations).find(id => input.session === `${manifest.id}:${id}`)
+      : undefined;
+    if (!input.resumeOnly && input.session && (selectedSessionId === undefined
+      || !await sessionInWorkspace(runtime, state.conversations, selectedSessionId, home, cwd))) {
+      throw new Error('Unknown session for this agent and working directory. List available sessions with the sessions command.');
+    }
     // A run Doer cancelled is not resumed. On Windows Doer's stop is a hard kill, indistinguishable from a crash locally.
     const cancelledRun = state.pending && doerClient && doerStart ? await cancelledRunFor(doerClient, doerStart, state.pending.env || {}) : undefined;
     if (state.pending && cancelledRun) {
@@ -253,7 +550,8 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       if (pending.memory !== "@agent-memory" && pending.memory !== memory) throw new Error("Unfinished work uses a different memory binding. Restore the original binding to resume.");
       conversationId = pending.conversation;
       const pendingConversation = await runtime.conversation(pending.conversation, context);
-      await pendingConversation?.configure({ cwd, maxTurns: settings.maxTurns, instructions: `${manifest.instructions}\n${input.instructions || ""}`, tools: allowedTools }, context);
+      if (!pendingConversation) throw new Error("Pending conversation is missing");
+      await pendingConversation.configure({ cwd, maxTurns: settings.maxTurns, instructions: `${manifest.instructions}\n${input.instructions || ""}`, tools: allowedTools }, context);
       emit({ type: "recovery", requestId: pending.requestId });
       // Restore task attribution, but use the current worker's fresh credentials.
       const keys: readonly string[] = DOER_RESTORED_ENV;
@@ -262,7 +560,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       try { const pendingSubmission = await runtime.submission(pending.submission, context);
         if (!pendingSubmission) throw new Error("Pending submission is missing");
         if (pending.prompt) recordRecall(home,pending.requestId,String(pending.conversation),'user',pending.prompt);
-        summary = await settle(pendingSubmission);
+        summary = await settle(pendingSubmission, pendingConversation);
         recordRecall(home,pending.requestId,String(pending.conversation),'assistant',summary); }
       finally { for (const key of keys) { if (saved[key] !== undefined) process.env[key] = saved[key]; else delete process.env[key]; } }
       await runtime.commit(async tx => { (await tx.doc(State)).pending = null; }, context);
@@ -277,9 +575,9 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       runSignal.throwIfAborted();
       currentRequestId = requestId;
       if (!input.prompt || !requestId) throw new Error("A prompt and stable requestId are required");
-      const key = hash(`${input.sessionKey || "main"}\n${cwd === home ? "@agent-home" : cwd}`);
-      conversationId = state.conversations[key];
-      if (!conversationId) {
+      const key = workspaceKey(home, cwd, input.sessionKey || 'main');
+      conversationId = selectedSessionId ?? state.conversations[key];
+      if (conversationId === undefined) {
         conversationId = await runtime.commit(async tx => {
           const doc = await tx.doc(State);
           const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
@@ -308,7 +606,7 @@ export async function runAgent(input: RunInput, emit: Emit = () => {}, suppliedM
       if (runSignal.aborted) abortHandler();
       const handle = await runtime.submission(submission, context);
       if (!handle) throw new Error("Submission missing after commit");
-      summary = await settle(handle);
+      summary = await settle(handle, conversation);
       recordRecall(home,requestId,String(conversationId),'assistant',summary);
       await runtime.commit(async tx => { (await tx.doc(State)).pending = null; }, context);
     }

@@ -85,19 +85,31 @@ Type `/` and the palette appears under the prompt. Keep typing to filter, Tab to
 | `/goal OBJECTIVE` | Keep working until done — see [Goal mode](#goal-mode) |
 | `/agents` · `/agent NAME` · `/new` | Switch agents or create one |
 | `/skills` · `/skill NAME` · `/use NAME TASK` | Browse skills, read one, or ask the agent to use one |
+| `/sessions` · `/session ID` | List and continue conversations with completed turns in this working directory |
+| `/fork N` | Start and select a new conversation through completed turn N |
 | `/memory` | Inspect, search and sync memory |
 | `/reflect` | Have the agent propose what it should remember |
 | `/permissions` | Shell, file writes, MCP tools |
 | `/tools` | Show live permissions, server status, and discovered MCP tools |
 | `/connections` | Add and manage MCP servers |
 | `/cwd [PATH]` | Set the folder the agent works in |
+| `/compact` | Summarize older context in the selected conversation |
 | `/runtime` | Turn limit, compaction, timeout |
 | `/actions` | Recent tool calls and their outcomes |
+| `/recovery-status [--verbose]` | Show the pending request ID before deciding whether to resume. Add `--verbose` to also show the saved conversation ID and model. |
 | `/resume` | Continue work interrupted by a crash |
 | `/settings` · `/theme` · `/app` | Settings, colors (`magic`, `purple`, `plain`), startup banner |
 | `/clear` · `/exit` | Clear the screen, leave |
 
+Use `/session default` to return to the default conversation. To continue from a script, list IDs with `betta-agents sessions HOME` and pass one to `betta-agents run HOME PROMPT --session ID`. The `/resume` command still recovers interrupted work.
+
+`/fork N` counts completed user turns from one in the selected conversation, including inherited turns. The fork includes the selected turn's assistant answer. Both conversations are available in `/sessions` immediately, and each continues independently.
+
+`/compact` runs on demand even when automatic compaction is off. It keeps the conversation selected and leaves original messages available to recall.
+
 Set `NO_COLOR=1` for no colors, or `DONJON_NO_MOTION=1` to skip the startup animation.
+
+Older saved 50-turn limits migrate to 150 on first read. To use 50, set `maxTurns 50` in the Runtime section of `/settings`. The saved choice persists across restarts.
 
 ## Goal mode
 
@@ -119,7 +131,13 @@ Each agent's memory lives in `HOME/memory/` as Markdown files under their own Gi
 
 `/memory` shows status, searches, opens files, shows history and diffs, reverts, and syncs to a Git remote. `/memory graph` maps links between files.
 
-`/reflect` asks the agent to review recent conversations and propose memory changes, each tied to the conversation it came from. Nothing changes until you apply the proposal.
+`/reflect` asks the agent to review the newest conversation messages that haven’t already been used in an applied proposal. It can reach older messages when newer ones have already been used. Each proposed memory change cites its source messages. Nothing changes until you apply the proposal.
+
+`/reflect status` shows how many messages in the next window of up to 200 unconsumed messages fit the configured character budget. It distinguishes an empty window from a first message that exceeds the budget. It leaves proposals and consumed evidence unchanged and makes no model call.
+
+Use `/reflect apply ID` to apply a saved proposal or `/reflect discard ID` to decline it. Both chat commands require exactly one proposal ID.
+
+Use `/reflect retry ID` to retry a failed or interrupted proposal. Press Esc or Ctrl-C during the retry to cancel it and return to chat.
 
 Full details — budgets, migration, recovery and sync — are in the [memory guide](MEMORY.md).
 
@@ -156,14 +174,21 @@ Read this before turning on the shell.
 betta-agents init HOME NAME PROVIDER/MODEL     create an agent
 betta-agents chat HOME                         interactive terminal
 betta-agents run HOME PROMPT [REQUEST_ID]      one headless turn
+betta-agents recovery-status HOME [--verbose]  show the interrupted request ID
 betta-agents resume HOME                       finish interrupted work
 betta-agents inspect HOME                      show identity and state
 betta-agents export HOME NEW_DIR [--continuation] [--history]
 betta-agents memory HOME COMMAND [ARGS]
-betta-agents reflect HOME [--apply]
+betta-agents reflect HOME [--apply [ID] | --status | --list | --preview ID | --discard ID | --retry ID]
 ```
 
+`reflect HOME --status` prints the eligible evidence counts as JSON. `reflect HOME --list` prints the same JSON array of saved proposals as chat's `/reflect list`. Use a proposal ID from that list with `reflect HOME --preview ID` to see the saved proposal and its diff as JSON. Status, listing, and preview are read-only and make no provider calls. Use `reflect HOME --apply ID` to apply a saved proposal and print the result as JSON without a provider call. Bare `--apply` runs reflection and applies the resulting proposal if it is ready. Use `reflect HOME --discard ID` to decline a saved proposal and print the result as JSON. Discard leaves committed memory and evidence consumption unchanged and makes no provider call. Use `reflect HOME --retry ID` to retry a failed or interrupted proposal and print the result as JSON. A ready proposal still requires explicit application. Choose at most one reflection flag. The standalone command rejects unknown arguments before starting reflection.
+
 `run` with the same `REQUEST_ID` executes once, however many times it is started.
+
+Use `betta-agents recovery-status HOME` to check for interrupted work before resuming. It prints JSON such as `{"pendingRequestId":"crash-proof"}` or `{"pendingRequestId":null}` and makes no provider calls. Add `--verbose` to include the saved `conversationId` and `model` in the same JSON object. All three fields are `null` when there is no interrupted request.
+
+When `resume` or standalone `run` recovers interrupted work, it prints the request ID to stderr and the final summary to stdout.
 
 ### Agent home layout
 

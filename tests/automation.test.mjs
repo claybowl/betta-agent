@@ -42,3 +42,41 @@ test('run failures name the model and the way out', async () => {
   assert.match(runFailureMessage({ reason: 'model_error', detail: 'Request timed out.' }, 'p/m'), /p\/m did not respond.*\/model/);
   assert.match(runFailureMessage({ reason: 'turn_limit' }, 'p/m'), /turn limit/);
 });
+
+test('provider error bodies become one readable line, including nested Gemini errors', async () => {
+  const { runFailureMessage } = await import('../dist/harness.js');
+  const gemini = JSON.stringify({ error: { message: JSON.stringify({ error: { code: 429, message: 'You exceeded your current quota, please check your plan.' } }, null, 2) } });
+  const m = runFailureMessage({ reason: 'model_error', detail: gemini }, 'google/x');
+  assert.match(m, /429 You exceeded your current quota/); assert.match(m, /billing or rate limit/); assert.doesNotMatch(m, /[{}]/);
+  assert.match(runFailureMessage({ reason: 'model_error', detail: '402 {"error":{"message":"Insufficient credits."}}' }, 'o/x'), /402 Insufficient credits\./);
+});
+test('bash defaults to a bounded timeout and says each call is a fresh shell', async () => {
+  const { boundedBash, DEFAULT_BASH_TIMEOUT_SECONDS } = await import('../dist/harness.js');
+  const seen = []; const tool = boundedBash({ name: 'bash', description: 'Run.', execute: async a => seen.push(a) });
+  await tool.execute({ command: 'x' }); await tool.execute({ command: 'y', timeout: 900 });
+  assert.equal(seen[0].timeout, DEFAULT_BASH_TIMEOUT_SECONDS); assert.equal(seen[1].timeout, 900);
+  assert.match(tool.description, /fresh shell/); assert.match(tool.description, /Stdin is closed/);
+});
+test('legacy 50-turn settings migrate once and a subsequently saved 50 survives', async t => {
+  const { initHome, lockHome } = await import('../dist/home.js');
+  const { readSettings, saveSettings, DEFAULT_MAX_TURNS } = await import('../dist/settings.js');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'betta-turns-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await initHome(dir, 'T', 'faux/test');
+  const defaults = await readSettings(dir);
+  assert.equal(defaults.maxTurns, DEFAULT_MAX_TURNS);
+  const file = path.join(dir, 'settings.json');
+  const legacy = { ...defaults, maxTurns: 50, maxTurnsMigrated: undefined, timeoutSeconds: 17 };
+  await fs.writeFile(file, JSON.stringify(legacy));
+  const release = await lockHome(dir);
+  try {
+    await assert.rejects(readSettings(dir), /busy/);
+    assert.equal(await fs.readFile(file, 'utf8'), JSON.stringify(legacy));
+  } finally { release(); }
+  const migrated = { ...legacy, maxTurns: DEFAULT_MAX_TURNS, maxTurnsMigrated: true };
+  assert.deepEqual(await readSettings(dir), migrated);
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), migrated);
+  await saveSettings(dir, legacy);
+  const chosen = { ...legacy, maxTurnsMigrated: true };
+  assert.deepEqual(await readSettings(dir), chosen);
+  assert.deepEqual(await readSettings(dir), chosen);
+});

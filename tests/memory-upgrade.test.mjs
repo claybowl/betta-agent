@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {spawn,spawnSync} from 'node:child_process';
+import {once} from 'node:events';
 import {fileURLToPath} from 'node:url';
 import {createModels} from '@earendil-works/pi-ai';
 import {fauxProvider,fauxAssistantMessage,fauxToolCall} from '@earendil-works/pi-ai/providers/faux';
@@ -15,8 +16,350 @@ import {reflect,proposals,applyReflection,discardReflection} from '../dist/refle
 import {runAgent} from '../dist/harness.js';
 import {listSkills,readSkill} from '../dist/skills.js';
 function fake(responses){const models=createModels(),faux=fauxProvider({models:[{id:'test'}]});models.setProvider(faux.provider);faux.setResponses(responses);return {models,faux};}
-async function home(t){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'donjon-memfs-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));await initHome(dir,'Test','faux/test');return dir;}
+async function home(t, model = 'faux/test'){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'donjon-memfs-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));await initHome(dir,'Test',model);return dir;}
 const change=(path,content,old)=>({path,content,expectedHash:old===undefined?'missing':digest(old)});
+test('reflection lists saved proposals across processes and reaches older unconsumed evidence', async t => {
+  const dir = await home(t, 'ollama/test');
+  const sourceId = 'older:user';
+  const sentinel = 'Prefer amber notebooks.';
+  recordRecall(dir, 'older', 'main', 'user', sentinel);
+  const consumed = [];
+  for (let i = 0; i < 200; i++) {
+    const requestId = `reviewed-${i}`;
+    recordRecall(dir, requestId, 'main', 'user', 'Previously reviewed evidence.');
+    consumed.push(`${requestId}:user`);
+  }
+  await saveState(dir, 'reflection-consumed.json', consumed);
+
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const requestsPath = path.join(dir, 'requests.jsonl');
+  let response = JSON.stringify({
+    summary: 'Notebook preference',
+    changes: [{ path: 'notebooks.md', content: sentinel, sourceIds: [sourceId] }],
+  });
+  const runCli = (command, args, input) =>
+    spawnSync(process.execPath, ['--import', provider, cli, command, dir, ...args], {
+      input, encoding: 'utf8', timeout: 20_000,
+      env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
+        COMPACT_REQUESTS: requestsPath, REFLECTION_FIXTURE_RESPONSE: response, NO_COLOR: '1' },
+    });
+  const successfulOutput = result => {
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+    return result.stdout;
+  };
+  const chat = command => successfulOutput(runCli('chat', [], `${command}\n/exit\n`));
+  const list = () => JSON.parse(successfulOutput(runCli('reflect', ['--list'])));
+  assert.deepEqual(list(), []);
+  await assert.rejects(fs.stat(requestsPath), { code: 'ENOENT' });
+  const output = chat('/reflect');
+  assert.match(output, /"status": "ready"/);
+  const [proposal] = await proposals(dir);
+  assert.deepEqual(proposal.sourceIds, [sourceId]);
+  const requests = await fs.readFile(requestsPath, 'utf8');
+  const lines = requests.trim().split('\n');
+  assert.equal(lines.length, 1);
+  const request = JSON.parse(lines[0]);
+  const { evidence } = JSON.parse(request.messages.at(-1).content);
+  assert.deepEqual(evidence.map(({ id, text }) => ({ id, text })), [{ id: sourceId, text: sentinel }]);
+
+  const readReflectionState = () => Promise.all(['reflection-proposals.json', 'reflection-consumed.json']
+    .map(name => fs.readFile(path.join(dir, 'state', name))));
+  const stateBeforeListing = await readReflectionState();
+  const listed = list();
+  assert.deepEqual(listed, [proposal]);
+  for (const flag of ['--apply', '--status']) {
+    const conflict = runCli('reflect', ['--list', flag]);
+    assert.equal(conflict.status, 1, conflict.error?.message ?? conflict.stderr);
+    assert.ok(conflict.stderr.includes(`--list and ${flag}`), conflict.stderr);
+  }
+  assert.deepEqual(await readReflectionState(), stateBeforeListing);
+  assert.equal(await fs.readFile(requestsPath, 'utf8'), requests);
+
+  const [{ id }] = listed;
+  const assertPreviewReadOnly = async () => {
+    assert.deepEqual(await readReflectionState(), stateBeforeListing);
+    assert.deepEqual(await fs.readFile(requestsPath), Buffer.from(requests));
+  };
+  const preview = JSON.parse(successfulOutput(runCli('reflect', ['--preview', id])));
+  assert.equal(preview.id, id);
+  assert.match(preview.diff, /^\+Prefer amber notebooks\.$/m);
+  await assertPreviewReadOnly();
+  for (const [args, error] of [
+    [['--preview', 'unknown-id'], /Unknown proposal/],
+    [['--preview'], /requires exactly one proposal ID/],
+    [['--preview', id, '--apply'], /--preview and --apply/],
+    [['--preview', id, '--status'], /--preview and --status/],
+    [['--list', '--preview', id], /--preview and --list/],
+    [['--preview', id, 'extra-id'], /requires exactly one proposal ID/],
+  ]) {
+    const result = runCli('reflect', args);
+    assert.equal(result.status, 1, result.error?.message ?? result.stderr);
+    assert.match(result.stderr, error);
+    await assertPreviewReadOnly();
+  }
+
+  const apply = () => JSON.parse(successfulOutput(runCli('reflect', ['--apply', id])));
+  const applied = apply();
+  assert.equal(applied.id, id);
+  assert.equal(applied.status, 'applied');
+  assert.deepEqual(list(), [applied]);
+  const memoryRoot = path.join(dir, 'memory');
+  assert.equal((await committedFiles(memoryRoot)).get('notebooks.md'), sentinel);
+  const appliedState = await readReflectionState();
+  assert.deepEqual(JSON.parse(appliedState[1]), [...consumed, sourceId]);
+  const appliedHead = await head(memoryRoot);
+  assert.deepEqual(apply(), applied);
+  assert.deepEqual(await readReflectionState(), appliedState);
+  assert.equal(await head(memoryRoot), appliedHead);
+  assert.match(chat('/reflect'), /No unconsumed conversation evidence\./);
+  assert.equal(await fs.readFile(requestsPath, 'utf8'), requests);
+
+  recordRecall(dir, 'new', 'main', 'user', 'Prefer blue folders.');
+  response = JSON.stringify({
+    summary: 'Folder preference',
+    changes: [{ path: 'folders.md', content: 'Prefer blue folders.', sourceIds: ['new:user'] }],
+  });
+  assert.match(chat('/reflect'), /"status": "ready"/);
+  const ready = list().find(item => item.status === 'ready');
+  assert.ok(ready);
+  const requestsBeforeDiscard = await fs.readFile(requestsPath);
+  const stateBeforeDiscard = await readReflectionState();
+  for (const [args, error] of [
+    [['--discard', ready.id, '--apply'], /--discard and --apply/],
+    [['--discard'], /requires exactly one proposal ID/],
+    [['--discard', ready.id, 'extra-id'], /requires exactly one proposal ID/],
+  ]) {
+    const result = runCli('reflect', args);
+    assert.equal(result.status, 1, result.error?.message ?? result.stderr);
+    assert.match(result.stderr, error);
+  }
+  assert.deepEqual(await readReflectionState(), stateBeforeDiscard);
+  for (const command of [`/reflect discard ${ready.id} extra-id`, '/reflect discard']) {
+    assert.match(chat(command), /Usage: \/reflect discard ID/);
+  }
+  const previewAfterInvalidDiscard = JSON.parse(successfulOutput(runCli('reflect', ['--preview', ready.id])));
+  assert.equal(previewAfterInvalidDiscard.status, 'ready');
+  assert.deepEqual(await readReflectionState(), stateBeforeDiscard);
+  assert.match(chat(`/reflect discard ${ready.id}`), /Discarded by user/);
+  const discarded = JSON.parse(successfulOutput(runCli('reflect', ['--preview', ready.id])));
+  assert.equal(discarded.id, ready.id);
+  assert.equal(discarded.status, 'failed');
+  assert.equal(discarded.error, 'Discarded by user; evidence remains unconsumed');
+  const { diff, ...savedProposal } = discarded;
+  assert.deepEqual(list().find(item => item.id === ready.id), savedProposal);
+  assert.equal(await head(memoryRoot), appliedHead);
+  assert.deepEqual((await readReflectionState())[1], stateBeforeDiscard[1]);
+  assert.deepEqual(await fs.readFile(requestsPath), requestsBeforeDiscard);
+
+  recordRecall(dir, 'confirmed', 'main', 'user', 'Prefer blue folders.');
+  response = JSON.stringify({
+    summary: 'Confirmed folder preference',
+    changes: [{ path: 'folders.md', content: 'Prefer blue folders.', sourceIds: ['confirmed:user'] }],
+  });
+  assert.match(chat('/reflect'), /"status": "ready"/);
+  const folderProposal = list().find(item => item.status === 'ready');
+  assert.ok(folderProposal);
+  const headBeforeApply = await head(memoryRoot);
+  const malformedApply = chat(`/reflect apply ${folderProposal.id} extra-id\n/reflect apply\n/reflect list`);
+  assert.equal([...malformedApply.matchAll(/Usage: \/reflect apply ID/g)].length, 2, malformedApply);
+  const savedAfterMalformedApply = list();
+  assert.ok(malformedApply.includes(JSON.stringify(savedAfterMalformedApply, null, 2)), malformedApply);
+  assert.deepEqual(savedAfterMalformedApply.find(item => item.id === folderProposal.id), folderProposal);
+  assert.equal(await head(memoryRoot), headBeforeApply);
+  await assert.rejects(fs.stat(path.join(memoryRoot, 'folders.md')), { code: 'ENOENT' });
+
+  assert.match(chat(`/reflect apply ${folderProposal.id}`), /"status": "applied"/);
+  assert.equal(list().find(item => item.id === folderProposal.id).status, 'applied');
+  assert.equal((await committedFiles(memoryRoot)).get('folders.md'), 'Prefer blue folders.');
+});
+test('standalone reflect retries a saved failure only when requested', async t => {
+  const dir = await home(t, 'ollama/test');
+  const sentinel = 'Prefer amber notebooks.';
+  recordRecall(dir, 'retry', 'main', 'user', sentinel);
+  await saveState(dir, 'reflection-consumed.json', []);
+  const requestsPath = path.join(dir, 'requests.jsonl');
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  let response = 'invalid JSON';
+  const run = (...args) => spawnSync(process.execPath, ['--import', provider, cli, 'reflect', dir, ...args], {
+    encoding: 'utf8', timeout: 20_000,
+    env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
+      COMPACT_REQUESTS: requestsPath, REFLECTION_FIXTURE_RESPONSE: response, NO_COLOR: '1' },
+  });
+  const json = result => {
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const readState = name => fs.readFile(path.join(dir, 'state', name));
+  const readRequests = () => fs.readFile(requestsPath, 'utf8');
+  const failure = run();
+  assert.equal(failure.status, 1, failure.error?.message ?? failure.stderr);
+  const [failed] = json(run('--list'));
+  assert.equal(failed.status, 'failed');
+  const firstRequest = await readRequests();
+  assert.equal(firstRequest.trim().split('\n').length, 1);
+  assert.equal(json(run()).status, 'failed');
+  assert.equal(await readRequests(), firstRequest);
+
+  response = JSON.stringify({
+    summary: 'Notebook preference',
+    changes: [{ path: 'notebooks.md', content: sentinel, sourceIds: ['retry:user'] }],
+  });
+  const ready = json(run('--retry', failed.id));
+  assert.equal(ready.id, failed.id);
+  assert.equal(ready.status, 'ready');
+  assert.deepEqual(json(run('--list')), [ready]);
+  const requests = await readRequests();
+  assert.ok(requests.startsWith(firstRequest));
+  assert.equal(requests.trim().split('\n').length, 2);
+  const consumed = await readState('reflection-consumed.json');
+  assert.deepEqual(JSON.parse(consumed), []);
+  assert.equal((await committedFiles(path.join(dir, 'memory'))).has('notebooks.md'), false);
+  const saved = await readState('reflection-proposals.json');
+  for (const [args, error] of [
+    [['--retry', failed.id], /Only failed or interrupted proposals/],
+    [['--retry', failed.id, '--apply'], /--retry and --apply/],
+    [['--retry'], /requires exactly one proposal ID/],
+    [['--retry', failed.id, 'extra-id'], /requires exactly one proposal ID/],
+  ]) {
+    const result = run(...args);
+    assert.equal(result.status, 1, result.error?.message ?? result.stderr);
+    assert.match(result.stderr, error);
+    assert.deepEqual(await readState('reflection-proposals.json'), saved);
+    assert.deepEqual(await readState('reflection-consumed.json'), consumed);
+    assert.equal(await readRequests(), requests);
+  }
+});
+test('SIGINT cancels chat reflection retry at the provider and returns control to chat', async t => {
+  const dir = await home(t, 'ollama/test');
+  recordRecall(dir, 'retry', 'main', 'user', 'Prefer amber notebooks.');
+  const root = path.join(dir, 'memory');
+  await migrateMemory(dir);
+  const revision = await head(root);
+  await saveState(dir, 'reflection-consumed.json', []);
+  await saveState(dir, 'reflection-settings.json', { timeoutSeconds: 60 });
+
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const env = { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
+    COMPACT_REQUESTS: path.join(dir, 'requests.jsonl'), REFLECTION_FIXTURE_RESPONSE: 'invalid JSON', NO_COLOR: '1' };
+  const reflectCli = (...args) => spawnSync(process.execPath, ['--import', provider, cli, 'reflect', dir, ...args],
+    { env, encoding: 'utf8', timeout: 10_000 });
+  const list = () => {
+    const result = reflectCli('--list');
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const initial = reflectCli();
+  assert.equal(initial.status, 1, initial.error?.message ?? initial.stderr);
+  const [failed] = list();
+  assert.equal(failed.status, 'failed');
+  assert.deepEqual(failed.sourceIds, ['retry:user']);
+
+  const chat = spawn(process.execPath, ['--import', provider, cli, 'chat', dir], {
+    env: { ...env, REFLECTION_FIXTURE_HOLD: '1' },
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+  });
+  const closed = once(chat, 'close');
+  t.after(async () => { chat.kill('SIGKILL'); await closed; });
+  let stdout = '', stderr = '';
+  chat.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+  chat.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+  const nextProviderEvent = () => once(chat, 'message', { signal: AbortSignal.timeout(5_000) }).then(([message]) => message);
+  const received = nextProviderEvent();
+  chat.stdin.write(`/reflect retry ${failed.id}\n`);
+  assert.deepEqual(await received, { event: 'received' });
+  const aborted = nextProviderEvent();
+  assert.ok(chat.kill('SIGINT'));
+  assert.deepEqual(await aborted, { event: 'aborted', reason: 'Error: Stopped by user' });
+
+  const listingDeadline = once(chat, 'close', { signal: AbortSignal.timeout(5_000) });
+  chat.stdin.end('/reflect list\n/exit\n');
+  assert.deepEqual(await listingDeadline, [0, null], stderr);
+  const stopped = stdout.indexOf('Turn stopped.');
+  assert.ok(stopped >= 0, stdout);
+  const listing = JSON.parse(stdout.slice(stdout.indexOf('[', stopped)));
+  assert.equal(listing[0].id, failed.id);
+  assert.equal(listing[0].status, 'failed');
+  assert.deepEqual(list(), listing);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, 'state', 'reflection-consumed.json'), 'utf8')), []);
+  assert.equal(await head(root), revision);
+});
+test('reflect status in chat and standalone counts evidence without changing state or calling the provider', async t => {
+  const dir = await home(t, 'ollama/test');
+  const expected = [
+    { id: 'first:user', text: 'Prefer amber notebooks.' },
+    { id: 'second:assistant', text: 'Use a pencil for drafts.' },
+  ];
+  recordRecall(dir, 'reviewed', 'main', 'user', 'Previously reviewed evidence.');
+  recordRecall(dir, 'first', 'main', 'user', expected[0].text);
+  recordRecall(dir, 'second', 'main', 'assistant', expected[1].text);
+  await saveState(dir, 'reflection-consumed.json', ['reviewed:user']);
+  await saveState(dir, 'reflection-proposals.json', []);
+  const readState = name => fs.readFile(path.join(dir, 'state', name));
+  const consumedBefore = await readState('reflection-consumed.json');
+  const proposalsBefore = await readState('reflection-proposals.json');
+  const requestsPath = path.join(dir, 'requests.jsonl');
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const runCli = (command, args, input) =>
+    spawnSync(process.execPath, ['--import', provider, cli, command, dir, ...args], {
+      input, encoding: 'utf8', timeout: 20_000,
+      env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
+        COMPACT_REQUESTS: requestsPath, REFLECTION_FIXTURE_RESPONSE: '{"summary":"Reviewed","changes":[]}', NO_COLOR: '1' },
+    });
+  const chat = input => {
+    const result = runCli('chat', [], input + '\n/exit\n');
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+    return result.stdout;
+  };
+
+  assert.equal([...chat('/reflect status\n/reflect status').matchAll(/"selectedMessages": 2\b/g)].length, 2);
+  assert.match(chat('/reflect status'), /"selectedMessages": 2\b/);
+  const assertReadOnly = async () => {
+    await assert.rejects(fs.stat(requestsPath), { code: 'ENOENT' });
+    assert.deepEqual(await readState('reflection-consumed.json'), consumedBefore);
+    assert.deepEqual(await readState('reflection-proposals.json'), proposalsBefore);
+  };
+  await assertReadOnly();
+  const typo = runCli('reflect', ['--stats']);
+  assert.equal(typo.status, 1, typo.error?.message ?? typo.stderr);
+  assert.match(typo.stderr, /Unknown reflection argument "--stats"/);
+  assert.match(typo.stderr, /reflect HOME \[--apply \[ID\] \| --status \| --list \| --preview ID \| --discard ID \| --retry ID\]/);
+  await assertReadOnly();
+
+  for (let i = 0; i < 2; i++) {
+    const result = runCli('reflect', ['--status']);
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+    assert.equal(JSON.parse(result.stdout).selectedMessages, 2);
+    await assertReadOnly();
+  }
+  const conflict = runCli('reflect', ['--status', '--apply']);
+  assert.equal(conflict.status, 1, conflict.error?.message ?? conflict.stderr);
+  assert.match(conflict.stderr, /--status and --apply/);
+  await assertReadOnly();
+
+  const reflection = runCli('reflect', []);
+  assert.equal(reflection.status, 0, reflection.error?.message ?? reflection.stderr);
+  assert.equal(JSON.parse(reflection.stdout).status, 'noop');
+  const requests = (await fs.readFile(requestsPath, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(requests.length, 1);
+  const { evidence } = JSON.parse(requests[0].messages.at(-1).content);
+  assert.deepEqual(evidence.map(({ id, text }) => ({ id, text })), expected);
+
+  await saveState(dir, 'reflection-consumed.json', ['reviewed:user', ...expected.map(({ id }) => id)]);
+  assert.match(chat('/reflect status'), /No unconsumed conversation evidence/);
+  await saveState(dir, 'reflection-settings.json', { maxInputCharacters: 1000 });
+  recordRecall(dir, 'oversized', 'main', 'user', 'x'.repeat(1000));
+  recordRecall(dir, 'short', 'main', 'user', 'Fits on its own.');
+  const blocked = chat('/reflect status');
+  assert.match(blocked, /"selectedMessages": 0\b/);
+  assert.match(blocked, /"windowMessages": 2\b/);
+  assert.match(blocked, /next recall message exceeds the reflection input budget/);
+  assert.equal((await fs.readFile(requestsPath, 'utf8')).trim().split('\n').length, 1);
+});
+
 test('migration preserves originals in history, adds frontmatter/indexes, and is repeatable',async t=>{
  const dir=await home(t),root=path.join(dir,'memory'),before=await head(root);
  await fs.mkdir(path.join(root,'projects'));await fs.writeFile(path.join(root,'projects','work.md'),'A durable project fact.');
@@ -50,6 +393,16 @@ test('runtime holds core fixed within a turn and activates learning on the follo
 test('recall is agent-scoped, idempotent, searchable and redacts known credentials',async t=>{
  const a=await home(t),b=await home(t);process.env.DONJON_TEST_API_KEY='super-secret-sample-value';try{recordRecall(a,'one','main','user','Use '+process.env.DONJON_TEST_API_KEY+' for the boat');recordRecall(a,'one','main','user','duplicate');}finally{delete process.env.DONJON_TEST_API_KEY;}
  assert.equal(recall(a).length,1);assert.match(recall(a,'boat')[0].text,/REDACTED/);assert.equal(recall(b).length,0);
+});
+test('recall searches past 2000 newer messages and limits literal case-insensitive matches',async t=>{
+ const dir=await home(t);
+ recordRecall(dir,'older','main','user','A 50% discount.');
+ recordRecall(dir,'newer','main','assistant','The DISCOUNT is 75%.');
+ recordRecall(dir,'without-percent','main','user','The discount is 75 dollars.');
+ recordRecall(dir,'without-discount','main','user','I am 100% certain.');
+ for(let i=0;i<2000;i++)recordRecall(dir,`filler-${i}`,'main','user','Unrelated conversation.');
+ assert.deepEqual(recall(dir,'DiScOuNt  %').map(entry=>entry.id),['older:user','newer:assistant']);
+ assert.deepEqual(recall(dir,'DiScOuNt %',1).map(entry=>entry.id),['newer:assistant']);
 });
 test('reflection proposes evidence-backed changes and only consumes evidence after application',async t=>{
  const dir=await home(t);await migrateMemory(dir);recordRecall(dir,'source','main','user','My boat is blue.');

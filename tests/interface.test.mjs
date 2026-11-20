@@ -80,3 +80,128 @@ test('runtime timeout cancels work instead of queuing it for the next wake',asyn
  await assert.rejects(fs.access(path.join(dir,'TOO_LATE')));
  assert.equal((await runAgent({home:dir,resumeOnly:true},undefined,fake([]))).summary,'No unfinished work.');
 });
+
+test('chat /settings keeps a deliberate 50-turn limit after restart', async t => {
+  const dir = await home(t);
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const defaults = await readSettings(dir);
+  await fs.writeFile(path.join(dir, 'settings.json'), JSON.stringify({
+    ...defaults, maxTurns: 50, maxTurnsMigrated: undefined, timeoutSeconds: 17,
+  }));
+  const chat = input => {
+    const result = spawnSync(process.execPath, [cli, 'chat', dir], {
+      env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'), NO_COLOR: '1' },
+      input, encoding: 'utf8', timeout: 10_000,
+    });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+    return result.stdout;
+  };
+  const edited = chat('/settings\n2\nmaxTurns 50\n/settings\n2\n\n/exit\n');
+  assert.deepEqual(Array.from(edited.matchAll(/^maxTurns\s+(\d+)$/gm), match => match[1]), ['150', '50']);
+  const restarted = chat('/settings\n2\n\n/exit\n');
+  assert.match(restarted, /^maxTurns\s+50$/m);
+  assert.match(restarted, /^timeout\s+17s /m);
+});
+
+test('chat /compact reduces provider input after restart and preserves recall', async t => {
+  const old = 'lantern atlas sentinel';
+  const recent = 'The last shipment was cobalt.';
+  const core = 'Always use the silver checklist.';
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const counts = [];
+  for (const compact of [false, true]) {
+    const dir = await home(t);
+    const manifestPath = path.join(dir, 'agent.json');
+    const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+    await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, model: 'ollama/test' }));
+    await fs.writeFile(path.join(dir, 'memory', 'persona.md'), core + '\n');
+    const settings = await readSettings(dir);
+    await saveSettings(dir, { ...settings, compaction: false });
+    const requestsPath = path.join(dir, 'requests.jsonl');
+    const chat = (input, cancel = false) => {
+      const result = spawnSync(process.execPath, ['--import', provider, cli, 'chat', dir], {
+        env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'), COMPACT_REQUESTS: requestsPath, COMPACT_CANCEL: cancel ? '1' : '0', NO_COLOR: '1' },
+        input, encoding: 'utf8', timeout: 20_000,
+      });
+      assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+      return result.stdout;
+    };
+    const setup = chat([
+      old + ' ' + 'stock ledger '.repeat(2200),
+      'stock ledger '.repeat(5600), recent, '/sessions', '/exit', '',
+    ].join('\n'));
+    const session = setup.match(/^(.+?)  \d{4}-\d{2}-\d{2}T/m)?.[1];
+    assert.ok(session, setup);
+    if (compact) {
+      if (process.platform !== 'win32') {
+        const stopped = chat(`/session ${session}\n/compact\n/exit\n`, true);
+        assert.match(stopped, /Compaction stopped\./, stopped);
+        assert.doesNotMatch(stopped, /Conversation compacted\./);
+      }
+      const output = chat(`/session ${session}\n/compact\n/sessions\n/exit\n`);
+      assert.match(output, /Conversation compacted\./, output);
+      assert.ok(output.split('\n').some(line => line.startsWith(session) && line.endsWith(' · selected')), output);
+    }
+    chat(`/session ${session}\nCheck current context\nFind the original message\n/exit\n`);
+    const requests = (await fs.readFile(requestsPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const probe = requests.find(({ messages }) => messages.at(-1).content === 'Check current context');
+    assert.ok(probe);
+    const messages = JSON.stringify(probe.messages);
+    assert.ok(messages.includes(recent));
+    assert.ok(messages.includes(core));
+    assert.equal(messages.includes(old), !compact);
+    // The scripted provider's tokenizer splits the input into word and punctuation tokens.
+    counts.push((JSON.stringify({ messages: probe.messages, tools: probe.tools }).match(/\w+|[^\w\s]/g) ?? []).length);
+    assert.ok(requests.some(({ messages }) => messages.some(message =>
+      message.role === 'tool' && message.content.includes(old + ' stock ledger'))));
+  }
+  assert.ok(counts[1] < counts[0], `Uncompacted vs. compacted input tokens: ${counts.join(' vs. ')}`);
+  t.diagnostic(`Scripted input tokens: ${counts[0]} uncompacted, ${counts[1]} compacted`);
+});
+
+test('chat /fork reopens a completed turn with an independent history after restart', async t => {
+  const dir = await home(t);
+  const manifestPath = path.join(dir, 'agent.json');
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+  await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, model: 'ollama/test' }));
+  const provider = fileURLToPath(new URL('./compact-provider.mjs', import.meta.url));
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+  const requestsPath = path.join(dir, 'requests.jsonl');
+  const chat = (...commands) => {
+    const result = spawnSync(process.execPath, ['--import', provider, cli, 'chat', dir], {
+      env: { PATH: process.env.PATH, DONJON_CONFIG_DIR: path.join(dir, 'config'),
+        COMPACT_REQUESTS: requestsPath, FORK_FIXTURE: '1', NO_COLOR: '1' },
+      input: [...commands, '/exit', ''].join('\n'), encoding: 'utf8', timeout: 20_000,
+    });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+    return result.stdout;
+  };
+  const listed = output => [...output.matchAll(/^([^\s]+:\d+)  \d{4}-\d{2}-\d{2}T/gm)].map(match => match[1]);
+  const requests = async () => (await fs.readFile(requestsPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const first = 'Amber sentinel', second = 'Indigo sentinel', third = 'Jade sentinel';
+  const setup = chat(first, second, third, '/sessions', '/fork 2');
+  const [original] = listed(setup);
+  const fork = setup.match(/Forked conversation ([^\s]+:\d+)\./)?.[1];
+  assert.ok(original && fork && original !== fork, setup);
+  assert.equal((await requests()).length, 3, 'Forking and listing should make no provider requests');
+
+  const originalFollowUp = 'Original follow-up sentinel';
+  const forkFollowUp = 'Fork follow-up sentinel';
+  const defaultFollowUp = 'Default follow-up sentinel';
+  const reopened = chat('/sessions', `/session ${original}`, originalFollowUp,
+    `/session ${fork}`, '/fork 4', '/sessions', forkFollowUp, '/session default', defaultFollowUp);
+  assert.deepEqual(listed(reopened), [original, fork, original, fork], reopened);
+  assert.match(reopened, /No completed turn 4 in the selected conversation\./);
+  assert.ok(reopened.split('\n').some(line => line.startsWith(fork) && line.endsWith(' · selected')), reopened);
+
+  const turn = prompt => [['user', prompt], ['assistant', `Answer to ${prompt}`]];
+  const prefix = [...turn(first), ...turn(second)];
+  const history = (await requests()).map(({ messages }) => messages
+    .filter(({ role }) => role !== 'system').map(({ role, content }) => [role, content]));
+  assert.deepEqual(history.slice(3), [
+    [...prefix, ...turn(third), ['user', originalFollowUp]],
+    [...prefix, ['user', forkFollowUp]],
+    [...prefix, ...turn(third), ...turn(originalFollowUp), ['user', defaultFollowUp]],
+  ]);
+});

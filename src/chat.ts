@@ -1,5 +1,5 @@
 import { memoryCommand } from './memory-service.js';
-import { reflect, previewReflection, proposals, applyReflection, discardReflection, retryReflection, reflectionSettings } from './reflection.js';
+import { reflect, previewReflection, proposals, applyReflection, discardReflection, retryReflection, reflectionSettings, reflectionStatus } from './reflection.js';
 import { saveState } from './memfs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -8,13 +8,13 @@ import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { emitKeypressEvents } from 'node:readline';
 import { readManifest, initHome, lockHome } from './home.js';
-import { runAgent, type Emit } from './harness.js';
+import { compactSession, forkSession, listSessions, recoveryStatus, runAgent, type Emit } from './harness.js';
 import { readApp, saveApp, readSettings, saveSettings, listAgents, atomicJson, configRoot, type AgentSettings, type Connection } from './settings.js';
 import { inspectSkills, readSkill } from './skills.js';
 import { readActions } from './activity.js';
 import { capabilityReport } from './connectivity.js';
 import { Connections } from './connections.js';
-import { clean, toolPreview, makeTheme, themeNames, themeLabels, rule, banner as wordmark, playBanner, readLine, pick, spinner, type Command, type PickItem, type ThemeName } from './tui.js';
+import { clean, toolPreview, providerProgressText, makeTheme, themeNames, themeLabels, rule, banner as wordmark, playBanner, readLine, pick, spinner, type Command, type PickItem, type ThemeName } from './tui.js';
 import { appModels, deviceId, subscriptionBlocked, FileCredentialStore } from './credentials.js';
 import { parseGoal, goalStatus, goalPrompt } from './goal.js';
 import { spawn } from 'node:child_process';
@@ -34,9 +34,10 @@ const commandList: Command[] = [
   { name: '/skill', description: 'Read skill instructions · /skill NAME' },
   { name: '/use', description: 'Ask the agent to use a skill · /use NAME TASK' },
   { name: '/memory', description: 'Memory status, search, history, sync' },
-  { name: '/reflect', description: 'Propose learning; list, apply ID, settings' },
+  { name: '/reflect', description: 'Propose learning; status, list, apply ID, settings' },
   { name: '/settings', description: 'Browse settings' },
   { name: '/permissions', description: 'Shell, file writes, MCP' },
+  { name: '/compact', description: 'Summarize older context in the selected conversation' },
   { name: '/runtime', description: 'Model, turn limit, compaction, timeout' },
   { name: '/connections', description: 'Connect browsers and MCP servers' },
   { name: '/prompt', description: 'View or edit this agent’s system instructions' },
@@ -45,6 +46,10 @@ const commandList: Command[] = [
   { name: '/theme', description: 'Magic City, purple or plain' },
   { name: '/app', description: 'Theme and startup banner' },
   { name: '/actions', description: 'Recent tool outcomes' },
+  { name: '/sessions', description: 'List conversations with completed turns' },
+  { name: '/session', description: 'Use a conversation by ID, or default' },
+  { name: '/fork', description: 'Start a new conversation from completed turn N' },
+  { name: '/recovery-status', description: 'Check for interrupted work (add --verbose for conversation and model)' },
   { name: '/resume', description: 'Recover unfinished work' },
   { name: '/clear', description: 'Clear screen' },
   { name: '/exit', description: 'Leave harness' },
@@ -57,6 +62,7 @@ export async function chat(initialHome: string) {
   let manifest = await readManifest(home), settings = await readSettings(home);
   const connections = new Connections();
   let history: string[] = [], leaving = false;
+  let session: string | undefined;
   // Pickers, the command palette and the spinner need a real terminal on both ends; scripted chat keeps plain prompts.
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const paint = () => makeTheme(app.theme, Boolean(process.stdout.isTTY) && !process.env.NO_COLOR);
@@ -182,7 +188,7 @@ export async function chat(initialHome: string) {
       for (let at = 'model';;) {
         const picked = await pick<string>({ title: 'Runtime · ' + manifest.name, theme, filter: false, receipt: false, select: at, hint: '↑↓ move · Enter changes · Esc done', items: [
           { label: 'model', value: 'model', badge: manifest.model, detail: 'pick from the live list' },
-          { label: 'maxTurns', value: 'maxTurns', badge: String(settings.maxTurns), detail: '1–500 turns per request' },
+          { label: 'maxTurns', value: 'maxTurns', badge: String(settings.maxTurns), detail: '1–1000 tool rounds per request' },
           { label: 'compaction', value: 'compaction', badge: settings.compaction ? '● on' : '○ off', tone: settings.compaction ? 'ok' : 'dim', detail: 'summarise long conversations' },
           { label: 'timeout', value: 'timeout', badge: settings.timeoutSeconds ? settings.timeoutSeconds + 's' : 'unlimited', detail: 'seconds per run; 0 = unlimited' }] });
         if (!picked) return;
@@ -236,7 +242,7 @@ export async function chat(initialHome: string) {
     if (!answer) return;
     if (answer === 'home') delete settings.cwd;
     else { const dir = await fs.realpath(expand(answer)); if (!(await fs.stat(dir)).isDirectory()) throw new Error('Choose a directory'); settings.cwd = dir; }
-    await save(); line(`Working directory: ${settings.cwd || home}`);
+    await save(); session = undefined; line(`Working directory: ${settings.cwd || home}`);
   };
   const connectionMenu = async () => {
     panel('Connections');
@@ -300,7 +306,7 @@ export async function chat(initialHome: string) {
   };
   const activate = async (target: string) => {
     const nextHome = await fs.realpath(target), nextManifest = await readManifest(nextHome), nextSettings = await readSettings(nextHome);
-    await connections.close(); home = nextHome; manifest = nextManifest; settings = nextSettings; await remember();
+    await connections.close(); session = undefined; home = nextHome; manifest = nextManifest; settings = nextSettings; await remember();
     if (tty) console.log(); status(); await health();
   };
   const newAgent = async () => {
@@ -366,8 +372,12 @@ export async function chat(initialHome: string) {
     else if (event.type === 'recovery') console.log(theme.warn(`Recovering interrupted run ${event.requestId}`));
     else if (event.type === 'connection') console.log(dim(`MCP ${event.name}: ${event.status}${event.message ? ' · ' + event.message : ''}`));
     else if (event.type === 'connection_log') console.log(dim(`[${event.name}] ${event.text}`));
+    else {
+      const progress = providerProgressText(event);
+      if (progress) console.log(dim(progress));
+    }
   };
-  const run = async (prompt: string, resumeOnly = false, task?: (signal: AbortSignal) => Promise<string>) => {
+  const run = async (prompt: string, resumeOnly = false, task?: (signal: AbortSignal) => Promise<string>, taskTitle = 'Memory reflection') => {
     const controller = new AbortController(), started = Date.now();
     let doing = '';
     const spin = spinner(theme, () => `Working · ${Math.round((Date.now() - started) / 1000)}s${doing ? ' · ' + doing : ''} · Esc to stop`);
@@ -390,13 +400,14 @@ export async function chat(initialHome: string) {
     if (process.stdin.isTTY) { emitKeypressEvents(process.stdin); process.stdin.setRawMode(true); process.stdin.on('keypress', keypress); process.stdin.resume(); }
     try {
       if (tty) spin.start(); else console.log(dim('Working… Esc to stop'));
-      if (task) { const text = await task(controller.signal); spin.stop(); panel('Memory reflection'); line(text); return; }
-      const result = await runAgent({ home, prompt, requestId: randomUUID(), resumeOnly }, live, undefined, controller.signal, connections);
+      if (task) { const text = await task(controller.signal); spin.stop(); panel(taskTitle); line(text); return; }
+      const result = await runAgent({ home, prompt, requestId: randomUUID(), resumeOnly, session }, live, undefined, controller.signal, connections);
       spin.stop(); panel(manifest.name); line(result.summary); console.log(dim(`${result.usage.inputTokens} in · ${result.usage.outputTokens} out · $${result.costUsd.toFixed(4)}`));
       return result;
     } catch (error) {
       spin.stop();
-      if (controller.signal.aborted) { line('Turn stopped. Use /actions to inspect outcomes; /resume will not restart this cancelled turn.'); }
+      if (controller.signal.aborted && taskTitle === 'Compaction') { line('Compaction stopped.'); }
+      else if (controller.signal.aborted) { line('Turn stopped. Use /actions to inspect outcomes; /resume will not restart this cancelled turn.'); }
       else throw error;
     } finally {
       spin.stop();
@@ -510,20 +521,31 @@ export async function chat(initialHome: string) {
           if(parts.length) { const result=await memoryCommand(home,parts[0],parts.slice(1)); line(typeof result==='string'?result:JSON.stringify(result,null,2)); }
         }
         else if (cmd === '/reflect') {
-          const [action,id] = arg.split(/\s+/);
+          const [action,id,...extra] = arg.split(/\s+/);
           if(!action || action==='preview') await run('',false,async signal=>{const p=id?await previewReflection(home,id):await reflect(home,undefined,signal);return JSON.stringify(p.id==='none'?p:await previewReflection(home,p.id),null,2);});
+          else if(action==='status') line(JSON.stringify(await reflectionStatus(home),null,2));
           else if(action==='list') line(JSON.stringify(await proposals(home),null,2));
-          else if(action==='apply') line(JSON.stringify(await applyReflection(home,id),null,2));
-          else if(action==='retry') await run('',false,async()=>JSON.stringify(await retryReflection(home,id),null,2));
-          else if(action==='discard') line(JSON.stringify(await discardReflection(home,id),null,2));
+          else if(action==='apply') {
+            if (!id || extra.length) { line('Usage: /reflect apply ID'); continue; }
+            line(JSON.stringify(await applyReflection(home,id),null,2));
+          }
+          else if(action==='retry') await run('',false,async signal=>JSON.stringify(await retryReflection(home,id,signal),null,2));
+          else if(action==='discard') {
+            if (!id || extra.length) { line('Usage: /reflect discard ID'); continue; }
+            line(JSON.stringify(await discardReflection(home,id),null,2));
+          }
           else if(action==='settings') {
             line(JSON.stringify(await reflectionSettings(home),null,2));
             const json=await ask('Reflection settings as JSON (Enter returns) > ');
             if(json) { const release=await lockHome(home);const prior=await reflectionSettings(home);try { await saveState(home,'reflection-settings.json',JSON.parse(json));try{await reflectionSettings(home);}catch(e){await saveState(home,'reflection-settings.json',prior);throw e;} }finally{release();}line('Reflection settings saved.'); }
-          } else throw new Error('/reflect preview | list | apply ID | discard ID | retry ID | settings');
+          } else throw new Error('/reflect status | preview | list | apply ID | discard ID | retry ID | settings');
         }
         else if (cmd === '/prompt') await systemPrompt(arg || undefined);
         else if (cmd === '/permissions') await permissions();
+        else if (cmd === '/compact') {
+          if (arg) throw new Error('Usage: /compact');
+          await run('', false, signal => compactSession(home, session, signal), 'Compaction');
+        }
         else if (cmd === '/runtime') await runtime();
         else if (cmd === '/app') await appearance();
         else if (cmd === '/cwd') await changeCwd(arg);
@@ -535,6 +557,34 @@ export async function chat(initialHome: string) {
         else if (cmd === '/skill') { if (arg) await showSkill(arg); else await skillsMenu(); }
         else if (cmd === '/use') { const i = arg.indexOf(' '); if (i < 1) throw new Error('Usage: /use NAME TASK — /skills lists the names'); const name = arg.slice(0,i); await readSkill(home,name); await run(`Use the installed skill ${JSON.stringify(name)}. First load its instructions with skill_read. Task: ${arg.slice(i+1)}`); }
         else if (cmd === '/actions') showActions();
+        else if (cmd === '/sessions') {
+          const sessions = await listSessions(home);
+          if (!sessions.length) line('No completed conversations in this working directory.');
+          for (const item of sessions) line(`${item.id}${item.lastCompletedAt ? '  ' + item.lastCompletedAt : ''}${item.id === session ? ' · selected' : ''}`);
+        }
+        else if (cmd === '/session') {
+          if (arg === 'default') { session = undefined; line('Using the default conversation.'); }
+          else {
+            if (!arg) throw new Error('Usage: /session ID or /session default. Use /sessions to list IDs.');
+            if (!(await listSessions(home)).some(item => item.id === arg)) throw new Error('Unknown session for this agent and working directory.');
+            session = arg;
+            line(`Using conversation ${session}.`);
+          }
+        }
+        else if (cmd === '/fork') {
+          if (!/^\d+$/.test(arg)) throw new Error('Usage: /fork N (a positive completed turn number)');
+          session = await forkSession(home, session, Number(arg));
+          line(`Forked conversation ${session}.`);
+        }
+        else if (cmd === '/recovery-status') {
+          const verbose = arg === '--verbose';
+          const { pendingRequestId, conversationId, model } = await recoveryStatus(home, verbose);
+          if (pendingRequestId === null) line('No interrupted work.');
+          else {
+            const request = `Interrupted request: ${pendingRequestId}`;
+            line(verbose ? `${request} | Conversation ID: ${conversationId} | Model: ${model}` : request);
+          }
+        }
         else if (cmd === '/resume') await run('',true);
         else if (cmd === '/clear') { if (process.stdout.isTTY) console.clear(); status(); }
         else if (cmd === '/settings') {
